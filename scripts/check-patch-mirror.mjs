@@ -11,13 +11,14 @@
 //   B 镜像一致性（对端树在场时）：registry.json / apply-patches.mjs / README.md 逐字节一致
 //     （CRLF 归一后比对）；tests/ 递归文件清单一致，共有文件逐字节一致。
 //
-// 对端树定位顺序：--peer <dir> > 环境变量 DSH_MIRROR_PEER > <root>/dsh-mobile-apk >
-// <root>/..（该目录含 scripts/patches 即认）。对端缺席时镜像层跳过并提示（CI 单仓
+// 显式 --peer <dir> / DSH_MIRROR_PEER 必须命中独立对端，错误时不回退。
+// 未指定时自动探测 <root>/dsh-mobile-apk > <root>/..（含 scripts/patches 即认）。
+// 自动探测对端缺席时镜像层跳过并提示（CI 单仓
 // checkout 场景应显式 checkout 对端后运行，见两仓 pr-gate.yml）。
 //
 // 用法：node scripts/check-patch-mirror.mjs [--self] [--peer <dir>]
 // 退出码：0 = 全部通过；1 = 失败（构建链与 CI 以此拒打包/拒合并）。
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, existsSync, realpathSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -77,22 +78,44 @@ if (regIds.length > 0 && implIds.length > 0) {
     `登记缺实现: [${missingImpl.join(', ')}]；实现缺登记: [${missingReg.join(', ')}]`)
 }
 
+// The native sync closure is declared once, including this checker and the
+// allowlist itself. Source APK app/vendor files belong only to the APK checkout.
+let nativeMirrors = []
+try {
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'scripts', 'native-proot-mirror-files.json'), 'utf8'))
+  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.files) ||
+      manifest.files.length === 0 || new Set(manifest.files).size !== manifest.files.length ||
+      manifest.files.some((p) => typeof p !== 'string' || !/^scripts\/(?:[\w.-]+\/)*[\w.-]+$/.test(p) || p.split('/').some((s) => s === '.' || s === '..')) ||
+      !['scripts/check-patch-mirror.mjs', 'scripts/native-proot-mirror-files.json'].every((p) => manifest.files.includes(p))) {
+    throw new Error('invalid native mirror file allowlist or missing self-check entries')
+  }
+  nativeMirrors = manifest.files
+} catch (e) {
+  check('native 同步清单可解析且包含镜像门禁自身', false, String(e).slice(0, 200))
+}
+const REQUIRED_NATIVE_MIRRORS = new Set(nativeMirrors)
+
 // ── B 镜像一致性 ────────────────────────────────────────────────
 let peer = null
+const explicitPeer = peerArgIdx >= 0 || process.env.DSH_MIRROR_PEER !== undefined
+if (SELF_ONLY && explicitPeer) check('--self 与显式 peer 不能并用', false)
 if (!SELF_ONLY) {
-  const candidates = []
-  if (PEER_OVERRIDE) candidates.push(PEER_OVERRIDE)
-  candidates.push(join(ROOT, 'dsh-mobile-apk'))
-  candidates.push(dirname(ROOT))
+  const candidates = explicitPeer ? [PEER_OVERRIDE] : [join(ROOT, 'dsh-mobile-apk'), dirname(ROOT)]
   for (const c of candidates) {
-    if (c === ROOT) continue
     try {
-      if (statSync(join(c, 'scripts', 'patches', 'registry.json')).isFile()) { peer = c; break }
-    } catch { /* 下一候选 */ }
+      if (!c || c.startsWith('--')) throw new Error('missing peer path')
+      const canonical = realpathSync(c)
+      if (canonical === realpathSync(ROOT)) throw new Error('peer resolves to this same tree (not independent mirror evidence)')
+      if (!statSync(join(canonical, 'scripts', 'patches', 'registry.json')).isFile()) throw new Error('peer registry is not a regular file')
+      peer = canonical
+      break
+    } catch (e) {
+      if (explicitPeer) check('显式镜像对端有效且独立', false, String(e).slice(0, 200))
+    }
   }
 }
 
-if (!SELF_ONLY && !peer) {
+if (!SELF_ONLY && !peer && !explicitPeer) {
   skip('镜像层：对端树不在场（CI 单仓场景请 checkout 对端后运行，或传 --peer/--self）')
 }
 if (peer) {
@@ -116,8 +139,10 @@ if (peer) {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name)
       const rel = prefix ? `${prefix}/${name}` : name
-      if (statSync(full).isDirectory()) out.set(rel, 'dir')
-      else out.set(rel, 'file')
+      if (statSync(full).isDirectory()) {
+        out.set(rel, 'dir')
+        for (const [nested, kind] of walk(full, rel)) out.set(nested, kind)
+      } else out.set(rel, 'file')
     }
     return out
   }
@@ -149,13 +174,10 @@ if (peer) {
   // 单边演进同样造成「云端自包含构建跑旧门禁/旧脚本」的幽灵面——本仓曾出现
   // bounded-io 门禁只落在 apk 兜、协调仓脚本仍带 Join-Path 拼写缺陷而无人察觉。
   // 对端缺该文件时跳过（apk 仓独占脚本合法）。
-  // The native gate is newly mandatory: a checked-out peer missing it is drift, not SKIP.
-  const REQUIRED_NATIVE_MIRRORS = new Set([
-    'scripts/check-native-proot.mjs', 'scripts/native-proot.json',
-    'scripts/lib/native-proot-elf.mjs', 'scripts/lib/check-native-proot-apk.py',
-    'scripts/tests/native-proot-gate.test.mjs',
-  ])
-  const MIRROR_TOP = [
+  // Every native closure file is mandatory: a checked-out peer missing one is
+  // drift, not SKIP. Keep legacy surfaces unchanged and deduplicate shared entries.
+  const MIRROR_TOP = [...new Set([
+    ...nativeMirrors,
     'scripts/build-apk-013.ps1',
     // ST-06 纳入镜像面：云端自包含构建链自身也是「单边演进 = 幽灵缺陷」面（此前只在 apk 仓存在、
     // 被镜像检查显式 SKIP）；注入集单一常量 + 契约/门禁脚本同批纳入（0.13.8-b 批 B1）。
@@ -198,11 +220,6 @@ if (peer) {
     'scripts/check-tool-output-schema.mjs',
     'scripts/check-control-ops.mjs',
     'scripts/check-release-gates.mjs',
-    'scripts/check-native-proot.mjs',
-    'scripts/native-proot.json',
-    'scripts/lib/native-proot-elf.mjs',
-    'scripts/lib/check-native-proot-apk.py',
-    'scripts/tests/native-proot-gate.test.mjs',
     'scripts/control-ops-known-gaps.json',
     'scripts/control-ops-pending.json',
     'scripts/check-inject-completeness.mjs',
@@ -215,7 +232,7 @@ if (peer) {
     'scripts/gen-protocol-v2-fixture.mjs',
     'scripts/profile-web.cordis.patch.yml',
     'scripts/snapshot-config/engine-overlay.json',
-  ]
+  ])]
   /** 递归列出目录下所有文件（相对路径；node_modules/.git 排除）——目录级镜像面用。 */
   const walkAll = (dir, prefix = '') => {
     const out = []
@@ -232,6 +249,9 @@ if (peer) {
     const mine = join(ROOT, rel)
     const theirs = join(peer, rel)
     if (!existsSync(mine)) { check(`镜像面源文件在场: ${rel}`, false, '本仓缺席（MIRROR_TOP 条目失效）'); continue }
+    if (REQUIRED_NATIVE_MIRRORS.has(rel) && !statSync(mine).isFile()) {
+      check(`native 镜像源为文件: ${rel}`, false, '同步清单只允许文件'); continue
+    }
     if (statSync(mine).isDirectory()) {
       if (!existsSync(theirs)) { skip(`镜像目录: ${rel}（对端无此目录）`); continue }
       const mineFiles = walkAll(mine)

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "description": "Required coordinator-root mirrors for native PRoot. APK app/vendor/source assets remain in the nested APK checkout; this is a sync allowlist, not proof that a real peer was synchronized.",
+  "files": [
+    "scripts/build-apk-013.ps1",
+    "scripts/build-apk.mjs",
+    "scripts/build-release.ps1",
+    "scripts/check-native-proot.mjs",
+    "scripts/check-patch-mirror.mjs",
+    "scripts/check-release-gates.mjs",
+    "scripts/lib/check-native-proot-apk.py",
+    "scripts/lib/native-proot-elf.mjs",
+    "scripts/native-proot.json",
+    "scripts/state-registry.json",
+    "scripts/tests/native-proot-gate.test.mjs",
+    "scripts/native-proot-mirror-files.json",
+    "scripts/tests/native-proot-mirror.test.mjs"
+  ]
+}

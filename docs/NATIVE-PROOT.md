@@ -75,6 +75,28 @@ and an offline rebuild/relink script. These are also packaged in the APK. Source
 provenance verified is not the same claim as independently reproduced bytes or
 full-device certification.
 
+## Android and upgrade acceptance
+
+`Native PRoot validation` also builds the Android test APK. After both source APK
+builds pass, a separate throwaway Android 35 x86_64 emulator installs the pinned
+0.13.8 baseline, waits for the snapshot transaction and HTTP service, writes a
+synthetic workspace fixture, and performs a real PackageManager upgrade. It checks
+that the snapshot fingerprint changes while fixture bytes and relative symlinks
+survive, then runs only the NativeProot instrumentation classes.
+
+`scripts/native-proot-emulator-smoke.py` requires an `emulator-<port>` serial AND
+ranchu/goldfish/qemu identity; it rejects pre-existing app installations and never
+accepts physical/network serials. Output is bounded technical test evidence, not
+screenshots or full device logs. Broad storage permission is revoked before the
+Context-isolated host tests. Guard tests are separate from actual acceptance.
+
+The fixture is not a Linux rootfs and x86_64 still has no native PRoot payload.
+These checks cover Android PM/NIO/host execution and upgrade data retention, not
+ARM64 Linux execution, guest package management or device-specific behaviour.
+`NativeProotUpgradeTest` separately exercises the actual snapshot transaction
+implementation's commit, rollback and recovery using the production preservation
+list rather than reimplementing the copy policy.
+
 ## Tests and release boundary
 
 ```sh
@@ -91,11 +113,11 @@ native payload bytes/ABI, and streams the embedded snapshot to validate its hash
 and node ELF. Explicit unsupported x86_64 is an empty-payload contract, not a skipped
 test. Negative fixtures must reject malformed/wrong/duplicate payloads.
 
-A prior **0.13.8 experimental repack with the exact ARM64 payload hashes** passed
-native Debian startup, file IO, DNS, apt index refresh and basic signal checks on
-one ARM64/4-KiB-page phone without QEMU. That is NOT an end-to-end test of this source
-branch. Pure JVM tests use real java.nio but Android API stubs for linking; they
-are not Android instrumented/Gradle acceptance tests.
+Native ARM64 guest execution is a separate acceptance target from source builds,
+host-side fixtures and emulator host checks. Standalone JVM helper tests use real
+java.nio with Android API stubs for linking; they alone cannot establish Android
+or native Linux guest acceptance. Test results must identify the exact source
+revision and the runtime contract exercised.
 
 Before marking a PR ready for release: full Gradle/unit-test builds, both final APK
 artifact gates, x86_64 emulator regression of the host app, ARM64 source-built APK
@@ -109,8 +131,7 @@ maintainer change. No CI/mirror gate is disabled to make this draft appear green
 - Gate/negative fixtures: 65 passed, 0 failed, 0 skipped; includes corrupt/missing/duplicate ZIP and AXML cases plus streaming large members.
 - Kotlin runtime helper: 21 JUnit tests passed on JDK21 with Kotlin2.0.21 and JVM target17. Only Android linking APIs were stubbed; this is not Gradle/device verification.
 - Source payload/provenance gate, static build-gate wiring, state registry, manifest hardening, bounded IO, Kotlin comment checks, shell syntax and git whitespace check passed.
-- A dedicated native-proot-validation workflow will test both host APK ABIs with a SHA-256-pinned public v0.14.0-preview factory snapshot. It is a development integration check, not a replacement for the private coordination mirror or full release pipeline.
-- No user token/configuration/rootfs or diagnostic transcript is included in the Git changes.
+- Source revision a12307e passed both host APK builds and artifact gates with a SHA-256-pinned public v0.14.0-preview factory snapshot; both Gradle runs reported 261 JVM tests passed, with no failures/errors/skips. This does not replace runtime acceptance or coordination mirror checks. The additional emulator and upgrade tests must be verified on their own subsequent revision.
 
 ### First cloud attempt
 

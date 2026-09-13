@@ -66,7 +66,11 @@ const check = (label, ok, detail) => {
 }
 /** 布局无关解析：协调仓根用 `dsh-mobile-apk/...`；apk 仓自包含根落到同名相对路径。 */
 const resolveRel = (p) => {
-  const cands = p.startsWith('dsh-mobile-apk/') ? [p, p.slice('dsh-mobile-apk/'.length)] : [p]
+  const nestedApk = existsSync(join(ROOT, 'dsh-mobile-apk', 'app'))
+  const cands = p.startsWith('dsh-mobile-apk/') && !nestedApk
+    ? [p, p.slice('dsh-mobile-apk/'.length)] : [p]
+  // Once a nested APK checkout is present, its missing file is a failure, not
+  // permission to silently validate a same-named coordinator file instead.
   return cands.find((c) => existsSync(join(ROOT, c)))
 }
 const readOrFail = (p) => {
@@ -100,13 +104,26 @@ for (const pos of POSITIONS) {
 
 // Native PRoot: each direct Gradle entry must select an ABI and validate the actual APK
 // before its first delivery copy. Merely mentioning the source gate is insufficient.
-for (const [file, buildMarker, copyMarker] of [
+const NATIVE_BUILD_ENTRIES = [
   ['scripts/build-apk.mjs', 'spawnSync(gradleCmd,', 'copyFileSync(join(apkDir,'],
   ['scripts/build-apk-013.ps1', '& .\\gradlew :app:assembleDebug', 'Copy-Item "app\\build\\outputs'],
   ['scripts/build-release.ps1', '& $Gradle assembleDebug', 'Copy-Item $apk.FullName'],
-  ['.github/workflows/build-snapshot.yml', './gradlew :app:assembleDebug', 'cp app/build/outputs/apk/debug/app-debug.apk'],
+  // This is an APK-owned workflow: coordinator layout must inspect the nested
+  // checkout, not a missing/unrelated workflow at the coordinator root.
+  ['dsh-mobile-apk/.github/workflows/build-snapshot.yml', './gradlew :app:assembleDebug', 'cp app/build/outputs/apk/debug/app-debug.apk'],
   ['dsh-mobile-apk/.github/workflows/native-proot-validation.yml', './gradlew :app:testDebugUnitTest', '- name: Upload validated dev APK'],
-]) {
+]
+const coordinatorSnapshot = '.github/workflows/build-snapshot.yml'
+if (resolveRel('dsh-mobile-apk/' + coordinatorSnapshot) !== coordinatorSnapshot &&
+    existsSync(join(ROOT, coordinatorSnapshot))) {
+  const text = readFileSync(join(ROOT, coordinatorSnapshot), 'utf8')
+  // A separate coordinator workflow that also builds APKs remains covered. A
+  // delegating/non-Gradle workflow is not a second direct build entry.
+  if (/\b(?:gradlew(?:\.bat)?|gradle)\b[\s\S]*?\bassembleDebug\b/i.test(text)) {
+    NATIVE_BUILD_ENTRIES.push([coordinatorSnapshot, './gradlew :app:assembleDebug', 'cp app/build/outputs/apk/debug/app-debug.apk'])
+  }
+}
+for (const [file, buildMarker, copyMarker] of NATIVE_BUILD_ENTRIES) {
   const text = readOrFail(file)
   if (text === null) continue
   const start = text.indexOf(buildMarker)

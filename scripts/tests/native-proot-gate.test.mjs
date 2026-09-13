@@ -2,12 +2,15 @@
 // Fully synthetic, offline fixtures; no snapshot, SDK, installed runtime or emulator required.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { validateElf } from '../lib/native-proot-elf.mjs'
+// Existing CI/build validation already runs this entrypoint. Keep the mirror and
+// coordinator-layout negative controls on that path without a second CI contract.
+import './native-proot-mirror.test.mjs'
 
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 const PYTHON = process.env.PYTHON || 'python'
@@ -259,6 +262,60 @@ print('bounded ZIP reads verified')
   const result = spawnSync(PYTHON, ['-c', code, join(ROOT, 'scripts/lib/check-native-proot-apk.py'), root], { encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } })
   assert.equal(result.status, 0, result.stderr || result.error?.message)
   assert.match(result.stdout, /bounded ZIP reads verified/)
+})
+
+// CLI layout fixtures relocate the real gate/helper entry points, not a private
+// checkout. Payloads/metadata are synthetic; success proves path resolution ONLY.
+function layoutFixture(t, nested) {
+  const coordinator = mkdtempSync(join(tmpdir(), 'native-proot-layout-'))
+  t.after(() => rmSync(coordinator, { recursive: true, force: true }))
+  const apk = nested ? join(coordinator, 'dsh-mobile-apk') : coordinator
+  mkdirSync(apk, { recursive: true })
+  const generated = spawnSync(PYTHON, ['-c', GENERATE, apk, JSON.stringify({ unsupported: true })], { encoding: 'utf8' })
+  assert.equal(generated.status, 0, generated.stderr || generated.error?.message)
+  for (const rel of ['scripts/check-native-proot.mjs', 'scripts/lib/native-proot-elf.mjs', 'scripts/lib/check-native-proot-apk.py']) {
+    mkdirSync(dirname(join(coordinator, rel)), { recursive: true })
+    copyFileSync(join(ROOT, rel), join(coordinator, rel))
+  }
+  const runDefault = (args = [], extraEnv = {}) => {
+    const env = { ...process.env, ...extraEnv }
+    if (!Object.hasOwn(extraEnv, 'DSH_APK_DIR')) delete env.DSH_APK_DIR
+    // Android linker-launched Node can report linker64 as process.execPath.
+    const result = spawnSync(process.env.NODE || 'node', [join(coordinator, 'scripts/check-native-proot.mjs'), ...args], {
+      cwd: tmpdir(), encoding: 'utf8', env,
+    })
+    assert.ifError(result.error)
+    return { code: result.status, output: result.stdout + result.stderr }
+  }
+  return { coordinator, apk, runDefault }
+}
+for (const nested of [false, true]) test(`default CLI locates ${nested ? 'coordinator/dsh-mobile-apk' : 'self-contained APK'} without --root or cwd assumptions`, t => {
+  const f = layoutFixture(t, nested)
+  expect(f.runDefault(), 0, /pinned corresponding source archive/)
+  expect(f.runDefault(['--abi', 'arm64', '--apk', join(f.apk, 'test.apk')]), 0, /all ZIP CRCs/)
+})
+test('coordinator default uses APK metadata/vendor, not same-named coordinator files', t => {
+  const f = layoutFixture(t, true)
+  writeFileSync(join(f.coordinator, 'scripts/native-proot.json'), 'invalid coordinator metadata')
+  expect(f.runDefault(), 0, /pinned corresponding source archive/)
+  unlinkSync(join(f.apk, 'scripts/native-proot.json'))
+  expect(f.runDefault(), 1, /native-proot.json/)
+})
+test('coordinator default fails when nested source archive is missing', t => {
+  const f = layoutFixture(t, true)
+  unlinkSync(join(f.apk, 'vendor/native-proot/assets/native-proot-source/fixture-source.tar.gz'))
+  expect(f.runDefault(), 1, /ENOENT/)
+})
+test('explicit --root wins over DSH_APK_DIR; invalid explicit root never falls back', t => {
+  const f = layoutFixture(t, true)
+  const missing = join(f.coordinator, 'missing-apk')
+  expect(f.runDefault(['--root', f.apk], { DSH_APK_DIR: missing }), 0)
+  expect(f.runDefault(['--root', missing], { DSH_APK_DIR: f.apk }), 1, /ENOENT/)
+})
+test('DSH_APK_DIR is honored and an invalid override fails closed', t => {
+  const f = layoutFixture(t, false)
+  expect(f.runDefault([], { DSH_APK_DIR: f.apk }), 0)
+  expect(f.runDefault([], { DSH_APK_DIR: join(f.coordinator, 'missing-apk') }), 1, /ENOENT/)
 })
 
 test('null supported metadata cannot masquerade as explicitly unsupported', t => {
