@@ -136,7 +136,11 @@ class AdbServerStartupInstrumentedTest {
             val link = Paths.get(entry.linkName)
             require(!link.isAbsolute && entry.linkName.isNotEmpty()) { "Absolute/empty fixture link rejected" }
             val resolved = target.parent.resolve(link).normalize()
-            require(resolved.startsWith(base) && selected(base.relativize(resolved).toString()))
+            require(resolved.startsWith(base))
+            // The full runtime also has unrelated aliases into omitted trees (e.g.
+            // terminfo/perl). Never create an outside-minimal-runtime link. If adb
+            // actually requires an omitted library, the real startup assertion fails.
+            if (!selected(base.relativize(resolved).toString())) continue
             links.add(target to link) // Defer links so extraction never writes through one.
           }
           entry.isFile -> {
