@@ -45,9 +45,12 @@ files/home/.dsh/workspaces/debian-rootfs
 
 This is under the existing workspaces user-data preservation boundary. It is NOT
 protection against uninstall, explicit workspace deletion, or user-issued deletion.
-The earlier experimental installation under usr/var/lib/proot-distro is **not**
-protected against a runtime snapshot replacement. Back it up before upgrades;
-use the legacy path only explicitly, for example:
+The earlier experimental installation under usr/var/lib/proot-distro is **not kept
+active at its old location** across a runtime snapshot replacement. The development
+upgrade-retention change preserves the complete displaced tree in private
+workspaces/upgrade-recovery storage (see UPGRADE-RECOVERY.md), but does not migrate
+or automatically select that guest. Back up and verify the old workflow before
+upgrades. While that legacy path still exists, select it explicitly, for example:
 
 ```sh
 dsh-debian --rootfs /data/data/com.dsharnessmobile.shell/files/usr/var/lib/proot-distro/containers/debian/rootfs /bin/sh
@@ -62,7 +65,10 @@ dsh-debian --bind-sdcard -- /bin/sh
 ```
 
 /sdcard is opt-in. PRoot is not a security boundary; run trusted software only.
-This patch does not change or replace any pre-existing user command named debian.
+Unknown pre-existing commands named debian remain untouched. When that entrance
+is absent, native preparation creates a managed compatibility link whose wrapper
+uses dsh-debian --bind-sdcard, retaining the historical command's shared-storage
+behavior without changing the maintained launcher's defaults.
 A later APK without the payload cannot run this path; it must fail clearly rather
 than claim native availability.
 

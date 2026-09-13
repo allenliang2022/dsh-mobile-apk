@@ -3,6 +3,8 @@ package com.dsharnessmobile.shell
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardCopyOption.COPY_ATTRIBUTES
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
@@ -27,6 +29,9 @@ import java.nio.file.attribute.BasicFileAttributes
  *
  * The marker is the recovery authority on the next start: `STAGED` discards the
  * stage, `SWAPPING` restores the parked factory entries, `SWAPPED` rolls forward.
+ * Completion first records `RETAINING`, then renames the whole displaced tree
+ * into append-only private recovery storage; no previous runtime is pruned.
+ * `ROLLED_BACK` makes interrupted rollback cleanup idempotent as well.
  * Nothing here depends on Android APIs so the state machine is unit-testable.
  */
 internal object SnapshotTransaction {
@@ -36,7 +41,10 @@ internal object SnapshotTransaction {
   const val MARKER_NAME = ".snapshot-transaction"
   private const val TMP_MARKER_NAME = ".snapshot-transaction.tmp"
 
-  enum class Phase { STAGED, SWAPPING, SWAPPED }
+  // RETAINING is a forward-only cleanup phase: previous may already have been
+  // renamed into recovery storage. Treating it as a rollback would delete live
+  // entries whose displaced copies are no longer under .snapshot-previous.
+  enum class Phase { STAGED, SWAPPING, SWAPPED, RETAINING, ROLLED_BACK }
 
   data class Marker(
     val phase: Phase,
@@ -59,20 +67,26 @@ internal object SnapshotTransaction {
   fun writeMarker(filesDir: File, marker: Marker) {
     val text = render(marker)
     val tmp = File(filesDir, TMP_MARKER_NAME)
-    tmp.writeText(text)
     val target = markerFile(filesDir)
-    SnapshotFs.deletePath(target)
-    if (!tmp.renameTo(target)) {
-      // Rename can fail on exotic mounts; the marker must still exist before the
-      // swap touches anything, so fall back to a direct write.
-      target.writeText(text)
-      SnapshotFs.deletePath(tmp)
+    if (SnapshotFs.isSymbolicLink(tmp) || SnapshotFs.isSymbolicLink(target)) {
+      throw IOException("Snapshot update blocked: transaction marker must not be a symbolic link")
+    }
+    java.io.FileOutputStream(tmp).use { output ->
+      output.write(text.toByteArray(Charsets.UTF_8))
+      output.fd.sync()
+    }
+    try {
+      Files.move(tmp.toPath(), target.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
+    } catch (_: AtomicMoveNotSupportedException) {
+      // Never unlink the recovery authority before its replacement is ready.
+      Files.move(tmp.toPath(), target.toPath(), REPLACE_EXISTING)
     }
   }
 
   fun readMarker(filesDir: File): Marker? {
     val file = markerFile(filesDir)
     if (!SnapshotFs.exists(file)) return null
+    if (SnapshotFs.isSymbolicLink(file)) throw IOException("Snapshot update blocked: transaction marker is a symbolic link")
     val text = try {
       file.readText()
     } catch (_: Throwable) {
@@ -107,11 +121,25 @@ internal object SnapshotTransaction {
     SnapshotFs.deletePath(File(filesDir, TMP_MARKER_NAME))
   }
 
-  /** Removes every artifact of a completed transaction. */
-  fun finish(filesDir: File) {
-    SnapshotFs.deletePath(previousRoot(filesDir))
+  /**
+   * Retains displaced data until explicit user cleanup; deletes only staging and
+   * journal artifacts. The whole previous tree includes usr AND profile backups.
+   * A failed retention leaves previous intact and the forward-only marker in
+   * place. Retrying after the rename is safe even if stage cleanup had failed.
+   * Returns the newly allocated recovery slot, if any, for caller diagnostics.
+   */
+  fun finish(filesDir: File): File? {
+    val marker = readMarker(filesDir)
+    if (marker?.phase == Phase.SWAPPING || marker?.phase == Phase.STAGED) {
+      throw IOException("Cannot finish an uncommitted snapshot transaction")
+    }
+    if (marker?.phase != Phase.ROLLED_BACK) {
+      writeMarker(filesDir, (marker ?: Marker(Phase.RETAINING, "", 0L)).copy(phase = Phase.RETAINING))
+    }
+    val retained = SnapshotRetention.retain(filesDir, previousRoot(filesDir))
     SnapshotFs.deletePath(stageRoot(filesDir))
     clearMarker(filesDir)
+    return retained
   }
 
   /**
@@ -131,8 +159,18 @@ internal object SnapshotTransaction {
   ): List<String> {
     val stagedUsr = File(stagedRoot, "usr")
     if (!SnapshotFs.exists(stagedUsr)) throw IOException("staged runtime is missing usr/")
+    SnapshotRetention.requireDirectory(stagedUsr)
+    requireParents(stagedRoot, "home/.dsh/entry")
+    requireParents(homeDir, ".dsh/entry")
     val previous = previousRoot(filesDir)
-    SnapshotFs.deletePath(previous)
+    // Never sweep an orphaned transaction: it may be the only remaining copy.
+    requireEmptyPrevious(previous)
+    val marker = readMarker(filesDir)
+    if (marker != null && marker.phase != Phase.STAGED) {
+      throw IOException("Snapshot update blocked: recover the pending transaction first")
+    }
+    SnapshotRetention.prepare(filesDir)
+    if (SnapshotFs.exists(usrDir)) SnapshotRetention.requireDirectory(usrDir)
     SnapshotFs.createDirectories(previous)
     writeMarker(filesDir, Marker(Phase.SWAPPING, fingerprint, startedAt))
     val moved = mutableListOf<String>()
@@ -151,7 +189,7 @@ internal object SnapshotTransaction {
           SnapshotFs.createDirectories(previousDsh)
           for (child in entry.listFiles() ?: emptyArray()) {
             val liveChild = File(liveDsh, child.name)
-            if (child.name in preservedNames && SnapshotFs.exists(liveChild)) {
+            if ((child.name in preservedNames || child.name == "workspaces") && SnapshotFs.exists(liveChild)) {
               // User data stays exactly where it is.
               onEntry("保留用户数据 " + child.name)
               continue
@@ -216,12 +254,20 @@ internal object SnapshotTransaction {
     onEntry: (String) -> Unit,
     notes: MutableList<String>,
   ) {
+    SnapshotRetention.requireDirectory(liveProfiles)
+    SnapshotRetention.requireDirectory(stagedProfiles)
     // Journal + 整目录拷贝备份（拷贝失败即中止刷新——宁可不起树也不丢用户生态）
     moved += "home/.dsh/profiles"
     writeMarker(filesDir, Marker(Phase.SWAPPING, fingerprint, startedAt, moved.toList()))
-    SnapshotFs.deletePath(previousProfiles)
+    // Publish a backup only after the full copy succeeds. A partial backup must
+    // never be mistaken for the authoritative original by outer rollback.
+    val pending = File(stageRoot(filesDir), ".profiles-backup-pending")
+    if (SnapshotFs.exists(previousProfiles) || SnapshotFs.exists(pending)) {
+      throw IOException("Snapshot update blocked: profile backup collision")
+    }
     SnapshotFs.createDirectories(previousProfiles.parentFile ?: filesDir)
-    copyRecursivelyStrict(liveProfiles, previousProfiles)
+    copyRecursivelyStrict(liveProfiles, pending)
+    Files.move(pending.toPath(), previousProfiles.toPath())
     try {
       // 用户面 = 只有 **profile 根** 的两个清单（profiles/<name>/package.json 与 cordis.patch.yml）：
       // 用户 pin / 用户追加块只可能在这里。其下 node_modules 子树内的清单属工厂面——0.14.0 P0：
@@ -249,15 +295,17 @@ internal object SnapshotTransaction {
     val attrs = Files.readAttributes(
       source.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS,
     )
-    if (attrs.isSymbolicLink) return // 链接属运行时残渣，与 replaceEntry 的 NOFOLLOW 语义一致：不复制
-    if (attrs.isDirectory) {
+    if (attrs.isSymbolicLink) {
+      Files.copy(source.toPath(), destination.toPath(), NOFOLLOW_LINKS)
+    } else if (attrs.isDirectory) {
       SnapshotFs.createDirectories(destination)
-      for (child in source.listFiles() ?: emptyArray()) copyRecursivelyStrict(child, File(destination, child.name))
+      val children = source.listFiles() ?: throw IOException("Cannot enumerate profile backup directory")
+      for (child in children) copyRecursivelyStrict(child, File(destination, child.name))
+      Files.setPosixFilePermissions(destination.toPath(), Files.getPosixFilePermissions(source.toPath(), NOFOLLOW_LINKS))
     } else if (attrs.isRegularFile) {
-      Files.copy(
-        source.toPath(), destination.toPath(),
-        REPLACE_EXISTING, COPY_ATTRIBUTES,
-      )
+      Files.copy(source.toPath(), destination.toPath(), COPY_ATTRIBUTES)
+    } else {
+      throw IOException("Snapshot update blocked: unsupported profile backup entry")
     }
   }
 
@@ -279,6 +327,13 @@ internal object SnapshotTransaction {
     val attrs = Files.readAttributes(
       staged.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS,
     )
+    if (!attrs.isSymbolicLink && SnapshotFs.isSymbolicLink(live) &&
+      (attrs.isDirectory || staged.absolutePath in userFacingFiles)) {
+      throw IOException("Snapshot update blocked: profile merge would follow a symbolic link")
+    }
+    // A factory-owned regular leaf may replace a link itself (for example .bin
+    // shims). Files.copy with REPLACE_EXISTING does not follow the target link;
+    // directory recursion and user-manifest read/merge remain prohibited above.
     when {
       attrs.isSymbolicLink -> return
       attrs.isDirectory -> {
@@ -385,14 +440,22 @@ internal object SnapshotTransaction {
   ): Recovery {
     val marker = readMarker(filesDir) ?: return Recovery(Outcome.NONE)
     if (marker.phase == Phase.STAGED) {
+      // STAGED never displaced anything. Unexpected previous data is not trash.
+      requireEmptyPrevious(previousRoot(filesDir))
       SnapshotFs.deletePath(stagedRoot)
       SnapshotFs.deletePath(previousRoot(filesDir))
       clearMarker(filesDir)
       return Recovery(Outcome.DISCARDED_STAGE)
     }
-    val committed = marker.phase == Phase.SWAPPED ||
+    if (marker.phase == Phase.ROLLED_BACK) {
+      rollback(filesDir, stagedRoot, usrDir, homeDir, marker)
+      clearMarker(filesDir)
+      return Recovery(Outcome.ROLLED_BACK)
+    }
+    val committed = marker.phase == Phase.SWAPPED || marker.phase == Phase.RETAINING ||
       (marker.fingerprint.isNotEmpty() && marker.fingerprint == currentFingerprint)
     if (committed) {
+      if (marker.phase == Phase.SWAPPING) writeMarker(filesDir, marker.copy(phase = Phase.SWAPPED))
       return Recovery(Outcome.ROLLED_FORWARD, marker.fingerprint.ifEmpty { null })
     }
     rollback(filesDir, stagedRoot, usrDir, homeDir, marker)
@@ -402,16 +465,27 @@ internal object SnapshotTransaction {
 
   /** Undoes an interrupted swap; leaves the marker in place (the caller clears it). */
   fun rollback(filesDir: File, stagedRoot: File, usrDir: File, homeDir: File, marker: Marker) {
-    val previous = previousRoot(filesDir)
-    val names = LinkedHashSet<String>()
-    names += marker.moved
-    // An entry displaced by the first half of a rename pair is journaled, but an
-    // entry whose journal write itself was lost is still discoverable here.
-    collectDisplacedNames(previous, names)
-    for (name in names.toList().asReversed()) {
-      rollbackEntry(stagedRoot, name, usrDir, homeDir, previous)
+    if (marker.phase == Phase.RETAINING) {
+      throw IOException("Snapshot retention pending: keep the new runtime and retry finish; rollback is unsafe")
     }
-    SnapshotFs.deletePath(previous)
+    // A pre-swap guard failure has not touched live data. In particular do not
+    // interpret an orphan previous tree as belonging to this STAGED transaction.
+    if (marker.phase == Phase.STAGED) return
+    val previous = previousRoot(filesDir)
+    if (marker.phase != Phase.ROLLED_BACK) {
+      val names = LinkedHashSet<String>()
+      names += marker.moved
+      // Entries whose journal write was lost are still discoverable here.
+      collectDisplacedNames(previous, names)
+      for (name in names) validateJournalName(name)
+      for (name in names.toList().asReversed()) {
+        rollbackEntry(stagedRoot, name, usrDir, homeDir, previous)
+      }
+      // Persist completion BEFORE removing staged rollback witnesses. A cleanup
+      // failure/restart must not reclassify restored originals as new entries.
+      writeMarker(filesDir, marker.copy(phase = Phase.ROLLED_BACK))
+    }
+    SnapshotRetention.retain(filesDir, previous)
     SnapshotFs.deletePath(stagedRoot)
   }
 
@@ -432,9 +506,9 @@ internal object SnapshotTransaction {
     // path still knows this entry was in flight.
     moved += journalName
     writeMarker(filesDir, Marker(Phase.SWAPPING, fingerprint, startedAt, moved.toList()))
+    if (SnapshotFs.exists(previous)) throw IOException("Snapshot update blocked: displaced entry collision")
     if (SnapshotFs.exists(live)) {
-      SnapshotFs.deletePath(previous)
-      SnapshotFs.move(live, previous)
+      Files.move(live.toPath(), previous.toPath())
     }
     try {
       SnapshotFs.move(staged, live)
@@ -455,8 +529,19 @@ internal object SnapshotTransaction {
     val staged = File(stagedRoot, name)
     val live = livePath(name, usrDir, homeDir)
     val displaced = File(previous, name)
+    requireParents(stagedRoot, name)
+    requireParents(previous, name)
+    if (name.startsWith("home/")) requireParents(homeDir, name.removePrefix("home/"))
     if (SnapshotFs.exists(displaced)) {
-      SnapshotFs.deletePath(live)
+      // Keep a staged witness before restoring. If rollback is interrupted after
+      // the restore, the next attempt must not delete that restored original.
+      if (!SnapshotFs.exists(staged)) {
+        SnapshotFs.createDirectories(requireNotNull(staged.parentFile))
+        if (SnapshotFs.exists(live)) SnapshotFs.move(live, staged)
+        else SnapshotFs.createDirectories(staged)
+      } else {
+        SnapshotFs.deletePath(live)
+      }
       SnapshotFs.move(displaced, live)
     } else if (!SnapshotFs.exists(staged) && SnapshotFs.exists(live)) {
       // No displaced copy and the staged entry is gone: it was newly installed.
@@ -465,6 +550,7 @@ internal object SnapshotTransaction {
   }
 
   private fun collectDisplacedNames(previous: File, out: MutableSet<String>) {
+    requireParents(previous, "home/.dsh/entry")
     if (SnapshotFs.exists(File(previous, "usr"))) out += "usr"
     val previousHome = File(previous, "home")
     if (!SnapshotFs.exists(previousHome)) return
@@ -474,6 +560,35 @@ internal object SnapshotTransaction {
       } else {
         out += "home/" + entry.name
       }
+    }
+  }
+
+  private fun requireEmptyPrevious(previous: File) {
+    if (!SnapshotFs.exists(previous)) return
+    SnapshotRetention.requireDirectory(previous)
+    val entries = previous.listFiles() ?: throw IOException("Cannot inspect previous snapshot")
+    if (entries.isNotEmpty()) {
+      throw IOException("Snapshot update blocked: .snapshot-previous contains unrecovered data; explicit recovery is required")
+    }
+  }
+
+  private fun validateJournalName(name: String) {
+    val parts = name.split('/')
+    val allowed = name == "usr" ||
+      (parts.size == 2 && parts[0] == "home" && parts[1] != ".dsh") ||
+      (parts.size == 3 && parts[0] == "home" && parts[1] == ".dsh" && parts[2] != "workspaces")
+    if (!allowed || parts.any { it.isEmpty() || it == "." || it == ".." || '\\' in it }) {
+      throw IOException("Snapshot rollback blocked: invalid journal entry")
+    }
+  }
+
+  /** Reject symlinks in intermediate components; the final payload may be a link. */
+  private fun requireParents(root: File, name: String) {
+    var directory = root
+    if (SnapshotFs.exists(directory)) SnapshotRetention.requireDirectory(directory)
+    for (part in name.split('/').dropLast(1)) {
+      directory = File(directory, part)
+      if (SnapshotFs.exists(directory)) SnapshotRetention.requireDirectory(directory)
     }
   }
 

@@ -138,11 +138,23 @@
       }
     },
     {
+      "id": "snapshot-displaced-runtime",
+      "holder": "SnapshotTransaction and SnapshotRetention",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/SnapshotRetention.kt:retain",
+      "sourceOfTruth": "Complete displaced runtime tree plus transaction marker phase; stock APK is not a live runtime backup",
+      "syncPath": "SWAPPED -> RETAINING -> unique private recovery slot; only forward cleanup after retention, no automatic pruning or restoration; unresolved marker blocks engine startup",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/SnapshotRetention.kt",
+        "pattern": "fun retain"
+      }
+    },
+    {
       "id": "native-proot-paths",
       "holder": "Android NativeProot resolver and app-owned launcher state",
       "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/NativeProot.kt:prepare",
       "sourceOfTruth": "ApplicationInfo.nativeLibraryDir from PackageManager; pinned native artifact metadata",
-      "syncPath": "EngineManager.shellEnv -> NativeProot.prepare -> atomic private state and stable $PREFIX/bin/dsh-debian; no host environment assumption",
+      "syncPath": "EngineManager.shellEnv -> NativeProot.prepare -> atomic private state and stable dsh-debian plus no-clobber legacy debian entrance; preserve unknown custom entries; no host environment assumption",
       "evidence": {
         "kind": "grep",
         "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/NativeProot.kt",

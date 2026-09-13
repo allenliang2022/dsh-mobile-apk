@@ -94,6 +94,31 @@ class W3ShellContractTest {
     assertTrue("新下载分支也必须走同一判定（旧实现只判 HTTP 200）", afterDownload.contains("artifactVerdict()"))
   }
 
+  @Test
+  fun activatedSnapshotCleanupCannotEnterRollback() {
+    val body = memberBody(codeOnly(source("EngineManager.kt")), "fun refreshSnapshot(")
+    assertTrue(body.contains("SnapshotTransaction.Phase.SWAPPED"))
+    assertTrue(body.contains("SnapshotTransaction.Phase.RETAINING"))
+    assertTrue(body.contains("marker.fingerprint == liveFingerprint()"))
+    val forward = body.indexOf("if (activationCommitted)")
+    val rollback = body.indexOf("SnapshotTransaction.rollback(")
+    assertTrue("Activated/retaining transactions must be handled before rollback", forward >= 0 && rollback > forward)
+    assertTrue(body.substring(forward, rollback).contains("return false"))
+    assertTrue("Successful update must retain previous runtime", body.contains("val retained = SnapshotTransaction.finish(filesDir)"))
+  }
+
+  @Test
+  fun unresolvedSnapshotMarkerPreventsStartingMixedRuntime() {
+    val body = memberBody(codeOnly(source("EngineManager.kt")), "fun startEngine(")
+    val marker = body.indexOf("SnapshotFs.exists(SnapshotTransaction.markerFile(context.filesDir))")
+    val start = body.indexOf("STARTING.compareAndSet")
+    assertTrue("Marker guard must precede process startup", marker >= 0 && start > marker)
+    assertTrue(body.substring(marker, start).contains("return false"))
+    val recover = memberBody(codeOnly(source("EngineManager.kt")), "fun recoverInterruptedRefresh()")
+    assertTrue("Unsafe marker read is contained without deleting sources", recover.contains("val marker = try"))
+    assertTrue(recover.contains("snapshot marker cannot be read safely"))
+  }
+
   // ── ST-12：后台真源生产者 + 非阻塞快照；未知不可谎报关闭 ──
 
   @Test

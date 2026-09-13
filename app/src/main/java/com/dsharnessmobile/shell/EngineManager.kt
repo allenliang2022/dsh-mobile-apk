@@ -153,14 +153,31 @@ class EngineManager(private val context: Context, private val pickToken: String?
       for (note in swapNotes) LogCollector.log(TAG, "profile patch reconciled during swap: " + note)
       // Commit point: the fingerprint is durable only after the swap completed.
       writeFingerprint(fingerprint)
-      SnapshotTransaction.finish(filesDir)
+      val retained = SnapshotTransaction.finish(filesDir)
+      if (retained != null) {
+        LogCollector.log(TAG, "previous runtime retained in private upgrade-recovery storage")
+        onStage("旧运行时已保留在恢复目录，不会自动删除")
+      }
       Log.i(TAG, "snapshot refreshed (fingerprint " + fingerprint.take(12) + ")")
       return true
     } catch (t: Throwable) {
-      Log.e(TAG, "snapshot refresh failed; rolling back", t)
-      onStage("运行时更新失败，正在回滚…")
+      Log.e(TAG, "snapshot refresh did not complete (" + t.javaClass.simpleName + ")")
       try {
         val marker = SnapshotTransaction.readMarker(filesDir)
+        val activationCommitted = marker != null && (
+          marker.phase == SnapshotTransaction.Phase.SWAPPED ||
+          marker.phase == SnapshotTransaction.Phase.RETAINING ||
+          (marker.phase == SnapshotTransaction.Phase.SWAPPING &&
+            marker.fingerprint.isNotEmpty() && marker.fingerprint == liveFingerprint())
+        )
+        if (activationCommitted) {
+          // Retention/cleanup failure is NOT a failed swap. The previous tree may
+          // already have moved to a recovery slot: rollback would delete live data.
+          LogCollector.log(TAG, "activated snapshot requires forward recovery; original data and marker retained")
+          onStage("运行时已切换，恢复备份收尾待重试；不会回滚或删除已有数据")
+          return false
+        }
+        onStage("运行时更新失败，正在回滚…")
         if (marker != null) {
           SnapshotTransaction.rollback(filesDir, stage, usrDir, homeDir, marker)
           SnapshotTransaction.clearMarker(filesDir)
@@ -168,8 +185,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
           SnapshotFs.deletePath(stage)
         }
       } catch (rollbackError: Throwable) {
-        // Keep the marker: the next start retries the rollback before anything else.
-        Log.e(TAG, "snapshot refresh rollback failed; recovery marker retained", rollbackError)
+        // Keep the marker and all recovery sources for the next safe retry.
+        Log.e(TAG, "snapshot recovery deferred; marker retained (" + rollbackError.javaClass.simpleName + ")")
       }
       return false
     } finally {
@@ -185,7 +202,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // Another refresh owns the stage/previous trees right now: never race it.
     if (EngineManager.snapshotRefreshing) return
     val filesDir = context.filesDir
-    val marker = SnapshotTransaction.readMarker(filesDir)
+    val marker = try {
+      SnapshotTransaction.readMarker(filesDir)
+    } catch (t: Throwable) {
+      Log.e(TAG, "snapshot marker cannot be read safely; recovery sources retained (" + t.javaClass.simpleName + ")")
+      return
+    }
     if (marker == null) {
       // No marker: only a stale stage directory can survive (a rollback that was
       // interrupted before it deleted the stage).
@@ -216,7 +238,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       SnapshotTransaction.Outcome.ROLLED_FORWARD -> {
         val fingerprint = recovery.fingerprintToCommit
         if (!fingerprint.isNullOrEmpty()) writeFingerprint(fingerprint)
-        SnapshotTransaction.finish(context.filesDir)
+        val retained = SnapshotTransaction.finish(context.filesDir)
+        if (retained != null) LogCollector.log(TAG, "previous runtime retained after interrupted upgrade recovery")
         Log.w(TAG, "interrupted refresh completed (runtime was already activated)")
       }
     }
@@ -693,6 +716,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
     if (EngineManager.snapshotRefreshing) {
       LogCollector.log(TAG, "engine start skipped (snapshot refresh in progress)")
       return true
+    }
+    if (SnapshotFs.exists(SnapshotTransaction.markerFile(context.filesDir))) {
+      LogCollector.log(TAG, "engine start blocked: snapshot transaction requires safe recovery; do not delete recovery data")
+      return false
     }
     // LD_PRELOAD depends on the snapshot's termux-exec lib: when missing, every child exec fails,
     // and combined with the cooldown window that means a silent 90s engine outage — assert explicitly
