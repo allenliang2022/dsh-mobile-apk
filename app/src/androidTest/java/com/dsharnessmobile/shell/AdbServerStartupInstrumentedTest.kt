@@ -133,10 +133,20 @@ class AdbServerStartupInstrumentedTest {
         when {
           entry.isDirectory -> Files.createDirectories(target)
           entry.isSymbolicLink -> {
-            val link = Paths.get(entry.linkName)
-            require(!link.isAbsolute && entry.linkName.isNotEmpty()) { "Absolute/empty fixture link rejected" }
-            val resolved = target.parent.resolve(link).normalize()
-            require(resolved.startsWith(base))
+            require(entry.linkName.isNotEmpty()) { "Empty fixture link rejected" }
+            val original = Paths.get(entry.linkName)
+            val resolved = if (original.isAbsolute) {
+              // Factory packages can retain Termux-prefix aliases. Relocate only
+              // known usr roots INTO this fixture; never follow the original path.
+              val prefixes = listOf("/data/data/com.termux/files/usr/",
+                "/data/data/com.dsharnessmobile.shell/files/usr/",
+                "/data/user/0/com.dsharnessmobile.shell/files/usr/")
+              val prefix = prefixes.firstOrNull { entry.linkName.startsWith(it) }
+                ?: error("Unrecognized absolute fixture link: $name")
+              base.resolve("usr/" + entry.linkName.removePrefix(prefix)).normalize()
+            } else target.parent.resolve(original).normalize()
+            require(resolved.startsWith(base.resolve("usr")))
+            val link = target.parent.relativize(resolved)
             // The full runtime also has unrelated aliases into omitted trees (e.g.
             // terminfo/perl). Never create an outside-minimal-runtime link. If adb
             // actually requires an omitted library, the real startup assertion fails.
