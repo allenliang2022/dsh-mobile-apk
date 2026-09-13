@@ -55,6 +55,9 @@ class AdbServerStartupInstrumentedTest {
           "SSL_CERT_FILE" to "${usr.path}/etc/tls/cert.pem",
           "SSL_CERT_DIR" to "${usr.path}/etc/tls/certs",
           "ADB_MDNS_AUTO_CONNECT" to "0", "ADB_LIBUSB" to "0",
+          // Emulator TCP scanning is independent of mDNS and the USB selector.
+          // Keep this fixture from auto-discovering the disposable emulator itself.
+          "ADB_LOCAL_TRANSPORT_MAX_PORT" to "0",
           "ADB_SERVER_SOCKET" to adbLocalServerSocket(port), // Production regression hook.
           "TERMUX__ROOTFS" to fixture.path, "TERMUX__PREFIX" to usr.path,
           "TERMUX_APP__DATA_DIR" to fixture.path, "TERMUX_APP__LEGACY_DATA_DIR" to fixture.path,
