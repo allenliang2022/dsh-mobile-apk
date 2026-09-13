@@ -146,7 +146,7 @@ class NativeProotUpgradeTest {
     assertRootfsUnchanged(defaultRootfs, workspaceBefore)
   }
 
-  @Test fun legacyUsrRootfsIsNotAutomaticallyMigratedOrPreservedBySnapshotUpgrade() {
+  @Test fun legacyUsrRootfsIsRetainedForExplicitRecoveryWithoutAutomaticMigration() {
     seedRuntimes()
     val before = seedRootfs(legacyRootfs, "legacy-only")
     // Real snapshots do not ship a Debian rootfs. Keep only an empty workspace seed.
@@ -165,12 +165,14 @@ class NativeProotUpgradeTest {
     assertEquals(SnapshotTransaction.Outcome.ROLLED_FORWARD, recovered.outcome)
     assertFalse(defaultRootfs.exists())
 
-    SnapshotTransaction.finish(files)
+    val retained = requireNotNull(SnapshotTransaction.finish(files))
 
     assertFinished()
     assertFalse(displacedLegacy.exists())
     assertFalse(legacyRootfs.exists())
     assertFalse(defaultRootfs.exists())
+    assertRootfsUnchanged(File(retained,
+      "previous/usr/var/lib/proot-distro/containers/debian/rootfs"), before)
   }
 
   private fun seedRuntimes() {

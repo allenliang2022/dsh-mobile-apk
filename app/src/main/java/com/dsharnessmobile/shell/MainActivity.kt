@@ -265,10 +265,15 @@ class MainActivity : ComponentActivity() {
     // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
     // 回落 false，本行随即短路——不再每次回前台弹系统页；用户重新授予后需再点一次开关。
     OverlayController.ensureStarted(this)
-    // ADB 端口后台预取（配对页秒回，不再同步等 NSD——2026-08-27 报障修复；15s TTL 内不重扫）。
-    // F1 常驻预热同线程搭车：server 就绪 + 密钥生成移出配对关键路径（2026-08-27 配对窗口实锤修复）。
+    // One application-context producer refreshes wireless observations independently
+    // of the settings page. Discovery must not wait behind ADB server warm-up.
+    AdbState.startStatusMonitor(applicationContext)
     try {
-      Thread { AdbState.prewarm(engineManager); AdbState.prefetchPorts(this, engineManager) }.start()
+      val appContext = applicationContext
+      Thread({ AdbState.prefetchPorts(appContext, engineManager) }, "dsh-adb-prefetch").apply { isDaemon = true }.start()
+      if (AdbState.prewarmDue()) {
+        Thread({ AdbState.prewarm(engineManager) }, "dsh-adb-prewarm").apply { isDaemon = true }.start()
+      }
     } catch (_: Throwable) {
     }
     // Back from the directory picker / Termux: re-route if the engine came up.
@@ -558,11 +563,9 @@ class MainActivity : ComponentActivity() {
         // 0.13.7：上游 0.1.5「在外部应用打开」的 Android 落点——系统选择器（MT 管理器 / 系统文件管理）。
         onOpenPathChooser = { path, mode -> PathOpen.openChooser(this, path, mode) },
         onAdbShell = { cmd -> AdbState.adbShellExecute(this, engineManager, cmd) },
-        // F1 预热钩子：设置页每 3s 轮询此桥，服务掉线后 60s 节流内自动补热（prewarmDue 纯读，线程仅在到期时创建）。
-        onGetAdbState = {
-          if (AdbState.prewarmDue()) Thread { AdbState.prewarm(engineManager) }.start()
-          AdbState.stateJson(this)
-        },
+        // Cheap cached view; the native monitor, not HTTP polling or this JS call,
+        // owns periodic observation. No server warm-up/TCP wait on the bridge thread.
+        onGetAdbState = { AdbState.stateJson(applicationContext) },
         onSetAdbAllow = { enable -> AdbState.setAllowSwitch(this, enable) },
         // 0.13.2 W7：悬浮球开关（控制器处理 overlay 权限引导；onResume 补启已授权的开关）。
         onGetOverlayEnabled = { OverlayController.isEnabled(this) },
@@ -570,11 +573,28 @@ class MainActivity : ComponentActivity() {
         // 0.14 真实配对：码值只经 adb argv（壳侧），端口取自系统「无线调试」弹窗；配对成功才写 paired。
         // F3 结构化结果（JSON ok/reason/message）：前端按 reason 分流文案，拒绝「输什么都像码错」。
         onSetAdbPair = { code, pairPort, connectPort ->
-          AdbState.pairWithCodeJson(this, engineManager, code, pairPort, connectPort)
+          AdbOperations.registry.runLegacy("pair") {
+            AdbState.pairWithCodeJson(applicationContext, engineManager, code, pairPort, connectPort)
+          }
         },
         onRevokeAdbPair = { AdbState.revokePair(this, engineManager) },
-        // 缓存优先（启动后台预取 + 15s TTL）；无缓存才同步扫——配对页不再卡 UI（2026-08-27 报障修复）。
-        onDiscoverAdbPorts = { AdbState.cachedPorts() ?: AdbState.discoverPorts(this, engineManager).toString() },
+        // An explicit scan is always fresh, including on the legacy bridge.
+        onDiscoverAdbPorts = {
+          AdbOperations.registry.runLegacy("discovery") { AdbState.discoverPorts(applicationContext, engineManager) }
+        },
+        onStartAdbDiscovery = {
+          val appContext = applicationContext
+          val engine = engineManager
+          AdbOperations.registry.submit("discovery") { AdbState.discoverPorts(appContext, engine) }
+        },
+        onStartAdbPair = { code, pairPort, connectPort, host ->
+          val appContext = applicationContext
+          val engine = engineManager
+          AdbOperations.registry.submit("pair") {
+            AdbState.pairWithCodeJson(appContext, engine, code, pairPort, connectPort, host)
+          }
+        },
+        onGetAdbOperation = { requestId -> AdbOperations.registry.get(requestId) },
         // 0.13.5 W4：无障碍控制通道（状态 + 系统设置引导 + Android 13 受限设置一键解锁）。
         onA11yStatus = { DeviceControlService.statusJson(this) },
         onOpenA11ySettings = { openAccessibilitySettings() },

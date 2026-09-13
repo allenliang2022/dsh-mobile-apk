@@ -7,6 +7,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.NoSuchFileException
@@ -82,6 +83,7 @@ object NativeProot {
           context.packageManager.getApplicationInfo(context.packageName, 0).nativeLibraryDir
         },
         launcherBytes = { context.assets.open(LAUNCHER_ASSET).use { it.readBytes() } },
+        onCompatibilityWarning = { Log.w("dsh-native-proot", it) },
       )
     } catch (e: IOException) {
       unavailable(e)
@@ -97,13 +99,16 @@ object NativeProot {
     return mapOf("DSH_NATIVE_PROOT_ERROR" to kind)
   }
 
-  /** Pure JVM seam: both providers are evaluated inside the cross-process lock. */
+  /** Pure JVM seam: both providers are evaluated inside the cross-process lock.
+   * Optional alias warnings are separate from maintained-launcher failure/environment.
+   */
   @Synchronized
   internal fun prepareFiles(
     filesDir: File,
     usrDir: File,
     nativeDirectory: () -> String?,
     launcherBytes: () -> ByteArray,
+    onCompatibilityWarning: (String) -> Unit = {},
   ): Map<String, String> {
     ensureDirectory(filesDir.toPath(), restrictMode = false)
     // Persistent inode: deleting the lock after use would allow two lock domains.
@@ -120,9 +125,51 @@ object NativeProot {
         ensureDirectory(paths.tmpDir.toPath(), restrictMode = true)
         writeIfChanged(paths.launcher, launcher, executable = true)
         writeIfChanged(paths.stateFile, stateBytes(paths), executable = false)
+        val warning = try {
+          prepareCompatibilityEntrance(filesDir, paths.launcher)
+        } catch (e: IOException) {
+          "Legacy debian compatibility entrance unavailable (${e.javaClass.simpleName})"
+        } catch (e: SecurityException) {
+          "Legacy debian compatibility entrance unavailable (${e.javaClass.simpleName})"
+        }
+        // No exception messages/paths or environment changes for this optional entrance.
+        if (warning != null) onCompatibilityWarning(warning)
         return environment(paths)
       }
     }
+  }
+
+  /**
+   * Keep the historical sdcard/argv contract without changing dsh-debian defaults.
+   * Only this private wrapper is owned: never read or replace an unknown bin/debian.
+   * The wrapper survives usr replacement and never contains an APK install path.
+   */
+  private fun prepareCompatibilityEntrance(filesDir: File, launcher: File): String? {
+    val wrapper = File(filesDir, "native-proot-debian-compat.sh").absoluteFile
+    val entry = File(launcher.parentFile, "debian").toPath()
+    val existing = try {
+      Files.readAttributes(entry, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+    } catch (_: NoSuchFileException) {
+      null
+    }
+    if (existing != null &&
+      (!existing.isSymbolicLink || Files.readSymbolicLink(entry) != wrapper.toPath())) {
+      return "Existing legacy debian entrance is not managed; preserved unchanged"
+    }
+    val bytes = ("#!/system/bin/sh\n" +
+      "exec /system/bin/sh ${shellQuote(launcher.absolutePath)} --bind-sdcard -- \"\$@\"\n")
+      .toByteArray(Charsets.UTF_8)
+    writeIfChanged(wrapper, bytes, executable = true)
+    if (existing == null) {
+      try {
+        // Atomic no-clobber claim. Rename could overwrite a concurrent foreign winner;
+        // hardlinks are not supported by Android app-private storage policy.
+        Files.createSymbolicLink(entry, wrapper.toPath())
+      } catch (_: FileAlreadyExistsException) {
+        return "Legacy debian entrance appeared during preparation; preserved unchanged"
+      }
+    }
+    return null
   }
 
   internal fun stateBytes(paths: Paths): ByteArray = buildString {

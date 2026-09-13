@@ -14,25 +14,20 @@
  *  - 自动审批模式不构成开放条件（宿主端判定）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-// 壳注入 JS 桥（授权变更唯一通道 = 原生 AdbState；门1跳系统设置同样走它）。
-interface AndroidShellBridge {
+import {
+  AdbOperationError, EMPTY_PAIR_FORM, isIpLiteral, mergeDiscovery, pairFailText, runAdbOperation,
+  type AdbOperationBridge, type PairForm, type PairOutcome,
+} from './adb-model.js'
+
+// Authorization mutations remain native-only. New APKs run pairing/discovery in bounded background jobs.
+interface AndroidShellBridge extends AdbOperationBridge {
   setAdbAllow?: (enable: boolean) => void
-  /**
-   * 0.14 真实配对：6 位码 + 系统「无线调试」弹窗的配对端口/连接端口（码值只进壳侧 adb argv）。
-   * F3（2026-08-27）：返回结构化 JSON 文本 {ok, reason, message}，替代 Boolean——
-   * 前端按机器可读 reason 分流文案；同步握手期间页面冻结属预期（最长约一分钟）。
-   */
-  setAdbPair?: (code: string, pairPort: number, connectPort: number) => string | void
   revokeAdbPair?: () => void
   requestAllFilesAccess?: () => void
   hasAllFilesAccess?: () => boolean
-  /** 自动扫描系统无线调试端口（issue #80）：返回配对端口候选 JSON 数组文本（端序）。 */
-  discoverAdbPorts?: () => string
-  /** 0.13.5 W4：无障碍控制通道状态 JSON {enabled,label,sdk,restrictedSettingsApplies,hint,tokenConfigured}。 */
+  getAdbState?: () => string
   a11yStatus?: () => string
-  /** 0.13.5 W4：走官方 Intent 唤起系统无障碍设置页（ACTION_ACCESSIBILITY_SETTINGS）。 */
   openA11ySettings?: () => void
-  /** 0.13.5 W4：Android 13+ 受限设置一键解锁（appops set … ACCESS_RESTRICTED_SETTINGS allow，走 ADB 通道）。 */
   unlockRestrictedSettings?: () => string
 }
 
@@ -46,35 +41,13 @@ interface A11yStatus {
   tokenConfigured?: boolean
 }
 
-/** 配对结构化结果（F3；reason 取值见壳侧 AdbState.classifyFailure / PairResult 注释）。 */
-interface PairOutcome {
-  ok?: boolean
-  reason?: string
-  message?: string | null
-}
-
-/** reason → 用户文案分流：拒绝「输什么都像码错」式笼统报错（2026-08-27 复盘定案）。 */
-function pairFailText(j: PairOutcome): string {
-  switch (j.reason) {
-    case 'window-closed':
-      return '配对码窗口已关闭（端口无监听）：请重新打开「无线调试 → 使用配对码配对」，用新码尽快提交'
-    case 'protocol-fault':
-      return '本地调试服务握手竞态（已自动重建）：请直接再点一次「配对」'
-    case 'server-not-ready':
-      return '本地调试服务未就绪：等几秒后再点「配对」（首次会自动预热）'
-    case 'handshake-timeout':
-      return '配对握手超时：确认系统配对码弹窗仍在前台后重试'
-    default:
-      return j.message ?? '配对失败：请核对 6 位码与端口（无线调试弹窗）'
-  }
-}
-
 /** 宿主端点状态面（AdbStatus 的页面投影）。 */
 interface AdbStatusView {
   tier: 'T0' | 'T1'
   fullAccess: boolean
   writeMode?: string
   wirelessDebugOn?: boolean
+  wirelessDebugState?: 'on' | 'off' | 'unknown'
   allowSwitchOn?: boolean
   paired?: boolean
   connected?: boolean
@@ -145,10 +118,13 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
   const [busy, setBusy] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [pairCode, setPairCode] = useState('')
-  const [pairPort, setPairPort] = useState('')
-  const [connectPort, setConnectPort] = useState('')
+  const [form, setForm] = useState<PairForm>({ ...EMPTY_PAIR_FORM })
+  const { pairPort, connectPort, host } = form
   const [confirm, setConfirm] = useState<ConfirmKind>(null)
   const mounted = useRef(true)
+  const actionGeneration = useRef(0)
+  const actionRunning = useRef(false)
+  const refreshGeneration = useRef(0)
 
   /** 操作类错误留存：15s 自动淡出（足够读完，又不必永久占屏）；新一轮操作即重置。 */
   const clearActionExpiry = useCallback(() => window.clearTimeout(actionExpiryRef.current), [])
@@ -159,22 +135,24 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
   }, [clearActionExpiry])
 
   const refresh = useCallback(async () => {
+    const generation = ++refreshGeneration.current
+    const current = () => mounted.current && generation === refreshGeneration.current
+    const bridge = nativeBridge()
+    // New APK guarantees a quick cached snapshot and schedules native observation updates.
+    // Do not merge a native legacy 'paired => wirelessOn' value into the engine's status projection.
+    if (typeof bridge?.startAdbDiscovery === 'function') {
+      try { bridge.getAdbState?.() } catch { /* HTTP remains the authoritative projection. */ }
+    }
     try {
       const st = await statusFetch()
-      if (mounted.current) {
-        setStatus(st)
-        setPollError(null)
-      }
-    } catch (e) {
-      if (mounted.current) setPollError('状态查询失败：' + String((e as Error).message))
-    }
-    // 无障碍状态来自壳侧原生（同步返回 JSON 文本），失败不影响 ADB 状态展示
-    try {
-      const raw = nativeBridge()?.a11yStatus?.()
-      if (mounted.current && typeof raw === 'string' && raw.startsWith('{')) setA11y(JSON.parse(raw) as A11yStatus)
+      if (current()) { setStatus(st); setPollError(null) }
     } catch {
-      /* 桥不可用（桌面/旧壳）：保持上次值 */
+      if (current()) { setStatus(null); setPollError('状态查询失败；暂不把上次状态当作当前事实') }
     }
+    try {
+      const raw = bridge?.a11yStatus?.()
+      if (current() && typeof raw === 'string') setA11y(JSON.parse(raw) as A11yStatus)
+    } catch { /* Native bridge unavailable; no authorization is inferred. */ }
   }, [])
 
   useEffect(() => {
@@ -183,32 +161,33 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
     const timer = window.setInterval(() => void refresh(), STATUS_REFRESH_MS)
     return () => {
       mounted.current = false
+      ++actionGeneration.current
+      ++refreshGeneration.current
+      actionRunning.current = false
       window.clearInterval(timer)
       window.clearTimeout(actionExpiryRef.current)
     }
   }, [refresh])
 
   const runMutation = useCallback(async (okMsgText: string, action: () => void) => {
+    if (actionRunning.current || busy) return
+    actionRunning.current = true
+    const generation = ++actionGeneration.current
+    const current = () => mounted.current && actionGeneration.current === generation
     setBusy(true)
     clearActionExpiry()
     setActionError(null)
     setOkMsg(null)
-    const bridge = nativeBridge()
-    if (!bridge) {
-      raiseActionError('授权变更需在安卓壳应用内进行（原生桥不可用）')
-      setBusy(false)
-      return
-    }
     try {
       action()
-      setOkMsg(okMsgText)
+      if (current()) setOkMsg(okMsgText)
       await refresh()
-    } catch (e) {
-      raiseActionError(String((e as Error).message))
+    } catch {
+      if (current()) raiseActionError('原生授权变更未确认；请刷新状态后核对')
     } finally {
-      setBusy(false)
+      if (current()) { actionRunning.current = false; setBusy(false) }
     }
-  }, [refresh, raiseActionError, clearActionExpiry])
+  }, [busy, refresh, raiseActionError, clearActionExpiry])
 
   const askAllow = useCallback((enabled: boolean) => setConfirm(enabled ? 'on' : 'off'), [])
   const askRevoke = useCallback(() => setConfirm('revoke'), [])
@@ -218,51 +197,41 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
     if (confirm === null) return
     const kind = confirm
     setConfirm(null)
-    const bridge = () => nativeBridge()
+    const bridge = nativeBridge()
     if (kind === 'revoke') {
-      await runMutation('已回收配对，请重新输入配对码', () => bridge()?.revokeAdbPair?.())
+      if (typeof bridge?.revokeAdbPair !== 'function') { raiseActionError('原生回收配对功能不可用'); return }
+      await runMutation('已提交回收配对，请核对刷新后的状态', () => bridge.revokeAdbPair!())
     } else {
-      await runMutation(
-        kind === 'on' ? '已开启「允许访问」' : '已关闭「允许访问」',
-        () => bridge()?.setAdbAllow?.(kind === 'on'),
-      )
+      if (typeof bridge?.setAdbAllow !== 'function') { raiseActionError('原生允许访问开关不可用'); return }
+      await runMutation('已提交开关变更，请核对刷新后的状态', () => bridge.setAdbAllow!(kind === 'on'))
     }
-  }, [confirm, runMutation])
+  }, [confirm, runMutation, raiseActionError])
 
   const scanPorts = useCallback(async () => {
-    const b = nativeBridge()
-    if (!b || typeof b.discoverAdbPorts !== 'function') {
-      raiseActionError('自动扫描需在安卓壳应用内进行（原生桥不可用）')
-      return
-    }
+    if (actionRunning.current || busy) return
+    actionRunning.current = true
+    const generation = ++actionGeneration.current
+    const current = () => mounted.current && actionGeneration.current === generation
     setScanning(true)
+    clearActionExpiry()
     setActionError(null)
-    setOkMsg(null)
+    setOkMsg('正在发现本机配对/连接服务…')
     try {
-      const text = b.discoverAdbPorts() ?? '{}'
-      const j = JSON.parse(text) as { pair?: number | null; connect?: number | null; candidates?: unknown }
-      const pair = typeof j.pair === 'number' ? j.pair : null
-      const conn = typeof j.connect === 'number' ? j.connect : null
-      const cands = Array.isArray(j.candidates)
-        ? j.candidates.filter((x): x is number => typeof x === 'number' && x > 0)
-        : []
-      // 精确属性优先；缺失时用候选第一个（同簇配对/连接相邻）。
-      const p1 = pair ?? cands[0] ?? null
-      const c1 = conn ?? cands[1] ?? p1
-      if (p1 === null || c1 === null) {
-        raiseActionError('未发现无线调试端口：请确认「开发者选项 → 无线调试」已开启')
-        return
-      }
-      setPairPort(String(p1))
-      setConnectPort(String(c1))
-      const extra = cands.length > 0 ? `（候选 ${cands.join('/')}）` : ''
-      setOkMsg(`已自动填入端口：配对 ${String(p1)} / 连接 ${String(c1)}${extra}`)
+      const result = await runAdbOperation(nativeBridge(), 'discovery', undefined, {
+        isCurrent: current,
+        onLegacy: () => setOkMsg('旧版应用使用同步扫描，期间页面可能暂时阻塞'),
+      })
+      if (!current()) return
+      const next = mergeDiscovery(form, result)
+      setForm(next.form)
+      setOkMsg(next.message)
+      await refresh()
     } catch (e) {
-      raiseActionError('端口扫描失败：' + String((e as Error).message))
+      if (current()) { setOkMsg(null); raiseActionError(e instanceof AdbOperationError ? e.message : '端口扫描未完成；请手动核对两个端口') }
     } finally {
-      setScanning(false)
+      if (current()) { actionRunning.current = false; setScanning(false) }
     }
-  }, [raiseActionError])
+  }, [form, busy, refresh, raiseActionError, clearActionExpiry])
 
   const submitPair = useCallback(async () => {
     if (!/^\d{6}$/.test(pairCode)) {
@@ -279,49 +248,37 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
       raiseActionError('端口无效：请抄录「无线调试」弹窗中的配对端口与连接端口（1-65535）')
       return
     }
-    // 防御（2026-08-24 真机实锤「输什么都显示配对成功」）：桥缺失或未提供 setAdbPair 时
-    // 可选链会静默返回 undefined —— `ok === false` 恒 false → 前端误报「配对完成」。
-    // 必须在调用前显式失败，绝不静默当成功。
-    const b = nativeBridge()
-    if (!b || typeof b.setAdbPair !== 'function') {
-      raiseActionError('配对需在安卓壳应用内进行（原生桥不可用）')
+    if (!isIpLiteral(host)) {
+      raiseActionError('请填写本机 IP 字面量（默认 127.0.0.1，不含端口），不可使用其他设备或主机名')
       return
     }
+    if (actionRunning.current || busy) return
+    actionRunning.current = true
+    const generation = ++actionGeneration.current
+    const current = () => mounted.current && actionGeneration.current === generation
     setBusy(true)
     clearActionExpiry()
     setActionError(null)
-    setOkMsg(null)
+    setOkMsg('正在配对；请保持当前配对码窗口有效，不要重复提交')
     try {
-      // F3 结构化结果：{ok, reason, message}。同步握手会阻塞本页最长约一分钟——
-      // 页面冻结属预期，不是卡死；提示常驻文案已说明。
-      let j: PairOutcome | null = null
-      try {
-        const raw = b.setAdbPair(pairCode, p, c)
-        j = typeof raw === 'string' && raw.startsWith('{') ? (JSON.parse(raw) as PairOutcome) : null
-      } catch {
-        /* 保持 j=null → 走笼统失败文案 */
-      }
-      if (j === null) {
-        // 旧壳兼容（boolean 纪元）：false → 笼统报错；undefined/true 视为旧语义成功（不可静默当败）
-        raiseActionError('配对失败：请核对 6 位码与端口（无线调试弹窗）')
-        return
-      }
-      if (j.ok !== true) {
-        // F4 失败不清输入：让用户只需重取新码重填，别陪跑三连清空（复盘定案）
-        raiseActionError(pairFailText(j))
-        return
-      }
+      const result = await runAdbOperation(nativeBridge(), 'pair', { code: pairCode, pairPort: p, connectPort: c, host }, {
+        isCurrent: current,
+        onLegacy: () => setOkMsg('旧版应用使用同步配对，期间页面可能阻塞；请勿重复提交'),
+      })
+      if (!current()) return
+      const j = result as unknown as PairOutcome
+      if (!j.ok) { setOkMsg(null); raiseActionError(pairFailText(j)); return }
       setOkMsg(j.reason === 'paired-connect-unconfirmed'
-        ? '已配对成功；连接探活待确认（引擎侧执行时自动重连）'
-        : '配对成功')
+        ? '配对成功，但连接尚未确认；请核对无线调试主页的连接端口'
+        : '配对成功（不等同于后续设备命令执行成功）')
       setPairCode('')
-      setPairPort('')
-      setConnectPort('')
       await refresh()
+    } catch (e) {
+      if (current()) { setOkMsg(null); raiseActionError(e instanceof AdbOperationError ? e.message : '配对结果未知；请先刷新状态，勿重复提交') }
     } finally {
-      setBusy(false)
+      if (current()) { actionRunning.current = false; setBusy(false) }
     }
-  }, [pairCode, pairPort, connectPort, refresh, raiseActionError, clearActionExpiry])
+  }, [pairCode, pairPort, connectPort, host, busy, refresh, raiseActionError, clearActionExpiry])
 
   const requestAllFiles = useCallback(() => {
     try {
@@ -393,11 +350,11 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
         </span>
       </div>
       <div className="adb-auth-actions">
-        <button type="button" className="adb-auth-btn" disabled={busy} onClick={openA11y}>
+        <button type="button" className="adb-auth-btn" disabled={busy || scanning} onClick={openA11y}>
           {a11y?.enabled ? '查看系统无障碍设置' : '去开启无障碍服务'}
         </button>
         {a11y?.restrictedSettingsApplies === true && (
-          <button type="button" className="adb-auth-btn" disabled={busy} onClick={() => void unlockRestricted()}>
+          <button type="button" className="adb-auth-btn" disabled={busy || scanning} onClick={() => void unlockRestricted()}>
             一键解锁受限设置
           </button>
         )}
@@ -424,15 +381,15 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
         <summary>ADB 通道（高级/脚本面）：shell 执行、原图截图、系统面</summary>
         <p className="adb-auth-note">
         安卓调试授权三道门：完全访问档位（前置）→ 系统无线调试开启 → 应用内「允许访问」开关 → 输入配对码。
-        配对为真实握手（adb pair）：码值与端口取自系统「无线调试」弹窗（IP 固定 127.0.0.1），
-        配对码只在壳侧使用、绝不出壳。自动审批不构成开放条件；重启后需重新配对（安全特性）。
-        注意：点「配对」后页面会同步等待握手结果（最长约一分钟）而短暂冻结，属正常现象；
-        失败时输入框保留原值，按报错提示重试即可。
+        配对码与配对端口来自「使用配对码配对」窗口；连接端口来自「无线调试」主页，两者不能混用。
+        地址默认 127.0.0.1，也可填写本机 IP；原生桥会拒绝其他设备地址。配对码不进入诊断回显。
+        新版应用在后台握手并轮询结果；旧版桥仍是同步调用，页面可能阻塞，升级应用可避免。
+        等待超时不代表原生操作已取消：先刷新状态，不要重复提交。
       </p>
 
       <div className={granted ? 'adb-auth-tier adb-auth-tier-ok' : 'adb-auth-tier adb-auth-tier-bad'}>
         <span>{granted ? 'ADB 通道就绪（引擎级三道门已齐）' : 'ADB 通道未就绪（引擎级三道门未齐）'}</span>
-        {status?.message ? <span className="adb-auth-tier-sub">{status.message}</span> : <span className="adb-auth-tier-sub">通道可用</span>}
+        {status?.message ? <span className="adb-auth-tier-sub">{status.message}</span> : <span className="adb-auth-tier-sub">{status ? '按会话权限判定实际能力' : '状态待查询'}</span>}
       </div>
 
       <div className="adb-auth-gate">
@@ -452,8 +409,8 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
 
       <div className="adb-auth-gate">
         <div className="adb-auth-gate-main">
-          <span className="adb-auth-gate-title">会话档位（ADB 能力开关 · 实时）</span>
-          <span className="adb-auth-gate-desc">ADB 能力（**含观察类**：截图/界面树/设备信息——隐私敏感面）只在会话档位 danger-full-access 下开放；会话内 /permission 实时切换（切回 read-only 立即关闭）；自动审批不构成开放条件</span>
+          <span className="adb-auth-gate-title">部署默认档位（不是当前会话档位）</span>
+          <span className="adb-auth-gate-desc">此处仅显示部署默认值。实际设备能力按每个会话的 /permission 实时判定，要求 danger-full-access；无需为此修改全局默认值，自动审批不构成开放条件</span>
         </div>
         {status?.writeMode === 'danger-full-access'
           ? <span className="adb-auth-chip adb-auth-chip-ok">danger-full-access</span>
@@ -463,18 +420,18 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
       <div className="adb-auth-gate">
         <div className="adb-auth-gate-main">
           <span className="adb-auth-gate-title">门2 · 系统无线调试</span>
-          <span className="adb-auth-gate-desc">开发者选项 → 无线调试（配对成功即视为已开启）</span>
+          <span className="adb-auth-gate-desc">系统开关观测与历史配对分开；未发现服务、观测过期或旧壳不支持时显示未知</span>
         </div>
-        {status?.wirelessDebugOn
+        {status?.wirelessDebugState === 'on'
           ? <span className="adb-auth-chip adb-auth-chip-ok">已开启</span>
-          : <span className="adb-auth-chip adb-auth-chip-bad">未开启</span>}
+          : <span className="adb-auth-chip adb-auth-chip-bad">{status?.wirelessDebugState === 'off' ? '已关闭' : '未知（待观测）'}</span>}
       </div>
 
       <label className="adb-auth-switch-row">
         <input
           type="checkbox"
           checked={status?.allowSwitchOn ?? false}
-          disabled={busy}
+          disabled={busy || scanning}
           onChange={(e) => askAllow(e.target.checked)}
         />
         <span>门3 · 应用内「允许访问」开关（关闭即失败关闭）</span>
@@ -488,7 +445,7 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
             : status.connected === false
               ? <span className="adb-auth-chip adb-auth-chip-bad">连接待确认</span>
               : null}
-          <button type="button" className="adb-auth-btn adb-auth-btn-danger" disabled={busy} onClick={askRevoke}>
+          <button type="button" className="adb-auth-btn adb-auth-btn-danger" disabled={busy || scanning} onClick={askRevoke}>
             回收配对
           </button>
         </div>
@@ -496,7 +453,20 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
         <div className="adb-auth-pair">
           <input
             className="adb-auth-input"
+            aria-label="本机 IP 地址"
+            placeholder="本机 IP（默认 127.0.0.1）"
+            value={host}
+            disabled={busy || scanning}
+            autoComplete="off"
+            onChange={(e) => setForm((f) => ({ ...f, host: e.target.value.trim(), hostSource: 'manual' }))}
+          />
+          <input
+            className="adb-auth-input"
             inputMode="numeric"
+            type="password"
+            autoComplete="off"
+            aria-label="6 位配对码"
+            disabled={busy || scanning}
             maxLength={6}
             placeholder="输入 6 位配对码"
             value={pairCode}
@@ -505,16 +475,20 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
           <input
             className="adb-auth-input adb-auth-input-port"
             inputMode="numeric"
-            placeholder="配对端口"
+            placeholder="配对码窗口端口"
+            aria-label="配对端口"
+            disabled={busy || scanning}
             value={pairPort}
-            onChange={(e) => setPairPort(e.target.value.replace(/\D/g, '').slice(0, 5))}
+            onChange={(e) => setForm((f) => ({ ...f, pairPort: e.target.value.replace(/\D/g, '').slice(0, 5), pairSource: 'manual' }))}
           />
           <input
             className="adb-auth-input adb-auth-input-port"
             inputMode="numeric"
-            placeholder="连接端口"
+            placeholder="无线调试主页连接端口"
+            aria-label="连接端口"
+            disabled={busy || scanning}
             value={connectPort}
-            onChange={(e) => setConnectPort(e.target.value.replace(/\D/g, '').slice(0, 5))}
+            onChange={(e) => setForm((f) => ({ ...f, connectPort: e.target.value.replace(/\D/g, '').slice(0, 5), connectSource: 'manual' }))}
           />
           <button
             type="button"
@@ -542,7 +516,7 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
       {okMsg !== null && <p className="adb-auth-ok">{okMsg}</p>}
 
       <div className="adb-auth-actions">
-        <button type="button" className="adb-auth-btn" disabled={busy} onClick={() => void refresh()}>刷新状态</button>
+        <button type="button" className="adb-auth-btn" disabled={busy || scanning} onClick={() => void refresh()}>刷新状态</button>
       </div>
 
       {confirmText !== null && (

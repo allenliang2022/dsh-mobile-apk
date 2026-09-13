@@ -60,11 +60,35 @@
       "holder": "壳侧（AdbState）",
       "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbState.kt",
       "sourceOfTruth": "三道人门（fullAccess / allowSwitch / paired）",
-      "syncPath": "桥 getAdbState() 每次现读三道门并合成 JSON，不做跨调用缓存",
+      "syncPath": "桥 getAdbState() 现读三道门并合成 JSON；wirelessKnown/on/ObservedAt 由单一后台观测生产者更新，unknown 与 paired 分离，插件拒绝陈旧观测",
       "evidence": {
         "kind": "grep",
         "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
         "pattern": "fun getAdbState"
+      }
+    },
+    {
+      "id": "adb-wireless-observation",
+      "holder": "原生 AdbState 后台观测生产者；插件只读时间戳快照",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbState.kt:refreshWireless",
+      "sourceOfTruth": "可读的系统无线调试开关；不可读时仅接受已验证本机端点的正向可达证据，未观测为 unknown",
+      "syncPath": "MainActivity.onResume 启动唯一 startStatusMonitor，约2s刷新 wirelessKnown/on/ObservedAt/endpointReachable；插件拒绝15s陈旧证据",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbState.kt",
+        "pattern": "fun startStatusMonitor"
+      }
+    },
+    {
+      "id": "adb-operation-receipts",
+      "holder": "进程级 AdbOperationRegistry",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbOperationRegistry.kt:submit",
+      "sourceOfTruth": "原生后台任务的结构化结果，不含参数或配对码；票据不代表授权成功",
+      "syncPath": "startAdbDiscovery/startAdbPair 返回票据；getAdbOperation 按requestId回读；页面丢弃陈旧generation，过期不宣称取消",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
+        "pattern": "fun getAdbOperation"
       }
     },
     {
@@ -114,11 +138,23 @@
       }
     },
     {
+      "id": "snapshot-displaced-runtime",
+      "holder": "SnapshotTransaction and SnapshotRetention",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/SnapshotRetention.kt:retain",
+      "sourceOfTruth": "Complete displaced runtime tree plus transaction marker phase; stock APK is not a live runtime backup",
+      "syncPath": "SWAPPED -> RETAINING -> unique private recovery slot; only forward cleanup after retention, no automatic pruning or restoration; unresolved marker blocks engine startup",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/SnapshotRetention.kt",
+        "pattern": "fun retain"
+      }
+    },
+    {
       "id": "native-proot-paths",
       "holder": "Android NativeProot resolver and app-owned launcher state",
       "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/NativeProot.kt:prepare",
       "sourceOfTruth": "ApplicationInfo.nativeLibraryDir from PackageManager; pinned native artifact metadata",
-      "syncPath": "EngineManager.shellEnv -> NativeProot.prepare -> atomic private state and stable $PREFIX/bin/dsh-debian; no host environment assumption",
+      "syncPath": "EngineManager.shellEnv -> NativeProot.prepare -> atomic private state and stable dsh-debian plus no-clobber legacy debian entrance; preserve unknown custom entries; no host environment assumption",
       "evidence": {
         "kind": "grep",
         "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/NativeProot.kt",

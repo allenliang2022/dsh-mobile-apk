@@ -39,6 +39,187 @@ class NativeProotTest {
   private fun mode(file: File) = PosixFilePermissions.toString(Files.getPosixFilePermissions(file.toPath(), NOFOLLOW_LINKS))
   private fun attributes(file: File) = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
 
+  private fun compatibilityWrapper(root: File = filesDir) = File(root, "native-proot-debian-compat.sh")
+  private fun compatibilityEntry(usr: File = usrDir) = File(usr, "bin/debian")
+  private fun refreshWithWarnings(warnings: MutableList<String>): Map<String, String> =
+    NativeProot.prepareFiles(filesDir, usrDir, { nativeDir.absolutePath }, { launcher },
+      onCompatibilityWarning = { warnings.add(it) })
+
+  @Test fun `absent legacy entrance creates private wrapper and exact owned symlink`() {
+    val warnings = mutableListOf<String>()
+    val env = refreshWithWarnings(warnings)
+    val wrapper = compatibilityWrapper()
+    val entry = compatibilityEntry()
+    assertTrue(Files.isSymbolicLink(entry.toPath()))
+    assertEquals(wrapper.toPath(), Files.readSymbolicLink(entry.toPath()))
+    assertEquals("#!/system/bin/sh\nexec /system/bin/sh " +
+      NativeProot.shellQuote(paths().launcher.absolutePath) + " --bind-sdcard -- \"\$@\"\n",
+      wrapper.readText())
+    assertEquals("rwx------", mode(wrapper))
+    assertFalse(wrapper.toPath().startsWith(usrDir.toPath()))
+    assertFalse(wrapper.readText().contains(nativeDir.absolutePath))
+    assertArrayEquals(launcher, paths().launcher.readBytes())
+    assertEquals(paths().launcher.absolutePath, env["DSH_DEBIAN_LAUNCHER"])
+    assertEquals("", env["DSH_NATIVE_PROOT_ERROR"])
+    assertTrue(warnings.isEmpty())
+  }
+
+  @Test fun `repeated legacy preparation preserves wrapper and link inode and timestamps`() {
+    val warnings = mutableListOf<String>()
+    refreshWithWarnings(warnings)
+    val wrapper = compatibilityWrapper()
+    val entry = compatibilityEntry()
+    val time = FileTime.fromMillis(1_600_000_000_000)
+    Files.setLastModifiedTime(wrapper.toPath(), time)
+    val beforeWrapper = attributes(wrapper)
+    val beforeEntry = attributes(entry)
+    Files.setPosixFilePermissions(wrapper.toPath(), PosixFilePermissions.fromString("rwxrwxrwx"))
+    repeat(3) { refreshWithWarnings(warnings) }
+    assertEquals(beforeWrapper.fileKey(), attributes(wrapper).fileKey())
+    assertEquals(time, attributes(wrapper).lastModifiedTime())
+    assertEquals(beforeEntry.fileKey(), attributes(entry).fileKey())
+    assertEquals(beforeEntry.lastModifiedTime(), attributes(entry).lastModifiedTime())
+    assertEquals("rwx------", mode(wrapper))
+    assertTrue(warnings.isEmpty())
+  }
+
+  @Test fun `usr replacement recreates legacy link without rewriting surviving wrapper`() {
+    refresh()
+    val wrapper = compatibilityWrapper()
+    val before = attributes(wrapper)
+    // Model only usr replacement, not SnapshotTransaction retention policy.
+    Files.delete(compatibilityEntry().toPath())
+    assertTrue(usrDir.deleteRecursively())
+    assertTrue(usrDir.mkdirs())
+    refresh(File(base, "replacement APK/lib"))
+    assertEquals(wrapper.toPath(), Files.readSymbolicLink(compatibilityEntry().toPath()))
+    assertEquals(before.fileKey(), attributes(wrapper).fileKey())
+    assertEquals(before.lastModifiedTime(), attributes(wrapper).lastModifiedTime())
+    assertArrayEquals(launcher, paths().launcher.readBytes())
+  }
+
+  @Test fun `custom regular directory and symlink legacy entries are preserved without opening them`() {
+    val entry = compatibilityEntry()
+    entry.parentFile.mkdirs()
+    val custom = File(filesDir, "custom user launcher").apply { writeText("do not run or rewrite") }
+    val missing = File(filesDir, "missing custom target")
+    for (kind in listOf("regular", "directory", "symlink", "dangling", "relative-owned", "indirect-owned")) {
+      val indirect = File(filesDir, "indirect")
+      when (kind) {
+        "regular" -> {
+          entry.writeText("custom legacy command")
+          Files.setPosixFilePermissions(entry.toPath(), PosixFilePermissions.fromString("---------"))
+        }
+        "directory" -> { entry.mkdir(); File(entry, "sentinel").writeText("preserve child") }
+        "symlink" -> Files.createSymbolicLink(entry.toPath(), custom.toPath())
+        "dangling" -> Files.createSymbolicLink(entry.toPath(), missing.toPath())
+        "relative-owned" -> Files.createSymbolicLink(entry.toPath(),
+          entry.parentFile.toPath().relativize(compatibilityWrapper().toPath()))
+        "indirect-owned" -> {
+          Files.createSymbolicLink(indirect.toPath(), compatibilityWrapper().toPath())
+          Files.createSymbolicLink(entry.toPath(), indirect.toPath())
+        }
+      }
+      val before = attributes(entry)
+      val beforeMode = mode(entry)
+      val beforeTarget = if (before.isSymbolicLink) Files.readSymbolicLink(entry.toPath()) else null
+      val warnings = mutableListOf<String>()
+      assertEquals("", refreshWithWarnings(warnings)["DSH_NATIVE_PROOT_ERROR"])
+      assertEquals(kind, before.fileKey(), attributes(entry).fileKey())
+      assertEquals(kind, before.lastModifiedTime(), attributes(entry).lastModifiedTime())
+      assertEquals(kind, beforeMode, mode(entry))
+      if (beforeTarget != null) assertEquals(beforeTarget, Files.readSymbolicLink(entry.toPath()))
+      assertFalse("Foreign entrance must not trigger wrapper generation", compatibilityWrapper().exists())
+      assertEquals(listOf("Existing legacy debian entrance is not managed; preserved unchanged"), warnings)
+      assertEquals("do not run or rewrite", custom.readText())
+      assertArrayEquals(launcher, paths().launcher.readBytes())
+      if (kind == "regular") {
+        Files.setPosixFilePermissions(entry.toPath(), PosixFilePermissions.fromString("rw-------"))
+        assertEquals("custom legacy command", entry.readText())
+      }
+      if (kind == "directory") {
+        val sentinel = File(entry, "sentinel")
+        assertEquals("preserve child", sentinel.readText())
+        Files.delete(sentinel.toPath())
+      }
+      Files.delete(entry.toPath())
+      Files.deleteIfExists(indirect.toPath())
+    }
+  }
+
+  @Test fun `managed link repairs missing or stale wrapper without replacing link`() {
+    refresh()
+    val entry = compatibilityEntry()
+    val wrapper = compatibilityWrapper()
+    val expected = wrapper.readBytes()
+    val beforeEntry = attributes(entry)
+    Files.delete(wrapper.toPath())
+    assertFalse(entry.exists()) // Dangling, but the exact owned target is still recognized.
+    val warnings = mutableListOf<String>()
+    refreshWithWarnings(warnings)
+    assertArrayEquals(expected, wrapper.readBytes())
+    wrapper.writeText("outdated managed wrapper")
+    refreshWithWarnings(warnings)
+    assertArrayEquals(expected, wrapper.readBytes())
+    assertEquals(beforeEntry.fileKey(), attributes(entry).fileKey())
+    assertEquals(beforeEntry.lastModifiedTime(), attributes(entry).lastModifiedTime())
+    assertTrue(warnings.isEmpty())
+  }
+
+  @Test fun `foreign alias also leaves a previously generated wrapper unchanged`() {
+    refresh()
+    Files.delete(compatibilityEntry().toPath())
+    compatibilityEntry().writeText("custom replacement")
+    compatibilityWrapper().writeText("managed but no longer referenced")
+    val before = attributes(compatibilityWrapper())
+    refresh()
+    assertEquals("custom replacement", compatibilityEntry().readText())
+    assertEquals("managed but no longer referenced", compatibilityWrapper().readText())
+    assertEquals(before.fileKey(), attributes(compatibilityWrapper()).fileKey())
+    assertEquals(before.lastModifiedTime(), attributes(compatibilityWrapper()).lastModifiedTime())
+  }
+
+  @Test fun `optional wrapper failure preserves foreign referent and maintained launcher availability`() {
+    val wrapper = compatibilityWrapper()
+    val victim = File(filesDir, "private user file").apply { writeText("secret sentinel") }
+    for (kind in listOf("directory", "symlink")) {
+      if (kind == "directory") wrapper.mkdir()
+      else Files.createSymbolicLink(wrapper.toPath(), victim.toPath())
+      val warnings = mutableListOf<String>()
+      val env = refreshWithWarnings(warnings)
+      assertEquals("", env["DSH_NATIVE_PROOT_ERROR"])
+      assertEquals(paths().launcher.absolutePath, env["DSH_DEBIAN_LAUNCHER"])
+      assertArrayEquals(launcher, paths().launcher.readBytes())
+      assertArrayEquals(NativeProot.stateBytes(paths()), paths().stateFile.readBytes())
+      assertFalse(Files.exists(compatibilityEntry().toPath(), NOFOLLOW_LINKS))
+      assertEquals(listOf("Legacy debian compatibility entrance unavailable (IOException)"), warnings)
+      assertEquals("secret sentinel", victim.readText())
+      Files.delete(wrapper.toPath())
+    }
+  }
+
+  @Test fun `legacy wrapper quotes stable launcher path and forwards sdcard contract and exact argv`() {
+    val specialFiles = File(base, "files with 'quotes' \$HOME;`id`").apply { mkdirs() }
+    val specialUsr = File(specialFiles, "usr with 'quotes'")
+    val maintained = File(specialUsr, "bin/dsh-debian")
+    val argvFixture = "#!/system/bin/sh\nprintf '%s\\000' \"\$@\"\n".toByteArray()
+    NativeProot.prepareFiles(specialFiles, specialUsr, { nativeDir.absolutePath }, { argvFixture })
+    val wrapper = compatibilityWrapper(specialFiles).readText()
+    assertEquals("#!/system/bin/sh\nexec /system/bin/sh " +
+      NativeProot.shellQuote(maintained.absolutePath) + " --bind-sdcard -- \"\$@\"\n", wrapper)
+    assertEquals(compatibilityWrapper(specialFiles).toPath(),
+      Files.readSymbolicLink(compatibilityEntry(specialUsr).toPath()))
+    assertArrayEquals(argvFixture, maintained.readBytes())
+    // A desktop JVM has no /system/bin/sh; adapt only that fixed interpreter token.
+    val portableBody = wrapper.substringAfter('\n').replaceFirst("exec /system/bin/sh ", "exec sh ")
+    for (args in listOf(emptyList(), listOf("", "space arg", "a'b", "\$HOME;`id`", "first\nsecond", "--help", "--"))) {
+      val process = ProcessBuilder(listOf("sh", "-c", portableBody, "legacy-test") + args).start()
+      val actual = process.inputStream.readBytes().toString(Charsets.UTF_8)
+      assertEquals(process.errorStream.bufferedReader().readText(), 0, process.waitFor())
+      assertEquals((listOf("--bind-sdcard", "--") + args).joinToString("\u0000", postfix = "\u0000"), actual)
+    }
+  }
+
   @Test fun `resolve uses only PackageManager path and snapshot-protected default rootfs`() {
     val proot = payload("libproot.so")
     val loader = payload("libproot-loader.so")
