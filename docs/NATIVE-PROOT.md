@@ -126,6 +126,22 @@ the pinned artifacts. Structural checks alone do not establish compilation: the
 preceding successful rebuild step is required. Native execution remains explicitly
 unverified by this job. No compiled replacement binary is published by this step.
 
+## ARM64 Android software feasibility probe
+
+The standard macos-15 ARM64 runner has no supported nested virtualization, so HVF
+is not assumed available. A separate, bounded probe requests the emulator's software
+path with both `-accel off` and `-feature -HVF`; this is a feasibility experiment,
+not a known working platform or release gate. It uses an official API30 ARM64 image,
+checks emulator/kernel ABI and runs only the APK helper suite if boot succeeds.
+The tested APK/test-APK artifacts are pinned to source revision 98638a2, independent
+of the probe script revision. No Linux rootfs or full guest acceptance is claimed.
+
+References: [standard runner limitations](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners),
+[emulator acceleration handling](https://android.googlesource.com/platform/external/qemu/+/ae9d18d2b6261179fbd57fffec720a04f7bfb053/android/android-emu/android/main-common.c#1481),
+[HVF feature gate](https://android.googlesource.com/platform/external/qemu/+/ae9d18d2b6261179fbd57fffec720a04f7bfb053/android/emu/feature/src/android/emulation/CpuAccelerator.cpp#815).
+The regular x86_64-host launcher rejects ARM64 API28+ AVDs; Linux qemu-user is not
+a substitute for an ARM64 Android system environment.
+
 ## Tests and release boundary
 
 ```sh

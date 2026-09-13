@@ -24,6 +24,7 @@ CLASSES = ",".join(PACKAGE + "." + n for n in
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--serial", required=True)
+    ap.add_argument("--expected-abi", choices=["x86_64", "arm64-v8a"], default="x86_64")
     ap.add_argument("--old-apk", type=Path)
     ap.add_argument("--old-sha256")
     ap.add_argument("--helper-only", action="store_true",
@@ -37,6 +38,8 @@ def main():
     if not re.fullmatch(r"emulator-\d+", args.serial):
         raise SystemExit("Refusing non-emulator ADB serial")
     if not args.helper_only:
+        if args.expected_abi != "x86_64":
+            raise SystemExit("Upgrade mode currently supports only the x86_64 acceptance fixture")
         for value in (args.old_sha256, args.snapshot_sha256):
             if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
                 raise SystemExit("Upgrade mode requires explicit old/snapshot SHA-256 digests")
@@ -51,8 +54,10 @@ def main():
             if hashlib.file_digest(f, "sha256").hexdigest() != args.old_sha256:
                 raise SystemExit("Old release APK digest mismatch")
     args.out.mkdir(parents=True, exist_ok=True)
-    evidence = {"scope": "isolated-x86_64-helper-boundary" if args.helper_only else "isolated-x86_64-upgrade-emulator",
-                "checks": [], "nativeArm64Acceptance": False,
+    if (args.out / "summary.json").exists():
+        raise SystemExit("Refusing to reuse an existing acceptance summary; choose a fresh output directory")
+    evidence = {"scope": "isolated-" + args.expected_abi + "-helper-boundary" if args.helper_only else "isolated-x86_64-upgrade-emulator",
+                "checks": [], "nativeArm64Acceptance": False, "arm64ApkHelperVerified": False,
                 "upgradeRequested": not args.helper_only, "upgradeAcceptance": False}
 
     def adb(*parts, timeout=60, ok=True):
@@ -78,8 +83,13 @@ def main():
     qemu = adb("shell", "getprop", "ro.kernel.qemu").stdout.strip()
     hardware = adb("shell", "getprop", "ro.hardware").stdout.strip()
     abi = adb("shell", "getprop", "ro.product.cpu.abi").stdout.strip()
-    if qemu != "1" or hardware not in ("ranchu", "goldfish") or abi != "x86_64":
-        raise SystemExit("Target is not an isolated x86_64 Android emulator")
+    if qemu != "1" or hardware not in ("ranchu", "goldfish") or abi != args.expected_abi:
+        raise SystemExit("Target is not an isolated " + args.expected_abi + " Android emulator")
+    evidence["runtimeAbi"] = abi
+    kernel_machine = adb("shell", "uname", "-m").stdout.strip()
+    if kernel_machine != ("aarch64" if args.expected_abi == "arm64-v8a" else "x86_64"):
+        raise SystemExit("Android kernel architecture does not match the expected emulator ABI")
+    evidence["kernelMachine"] = kernel_machine
     api = int(adb("shell", "getprop", "ro.build.version.sdk").stdout.strip())
     if api < 26 or (api < 30 and not args.helper_only):
         raise SystemExit("Helper boundary requires API26+; host upgrade suite requires API30+")
@@ -134,6 +144,7 @@ def main():
             adb("install", "-r", "-t", str(args.test_apk), timeout=180)
             instrument(PACKAGE + ".NativeProotAcceptanceTest")
             record("real Android API-boundary PM/NIO/helper instrumentation only")
+            evidence["arm64ApkHelperVerified"] = args.expected_abi == "arm64-v8a"
             evidence["status"] = "passed"
             return
         adb("install", "-r", "-t", str(args.old_apk), timeout=180)

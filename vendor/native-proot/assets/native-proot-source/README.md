@@ -11,8 +11,10 @@ script and `string-header.patch`. We additionally supply `talloc-answers.txt`
 from that exact DroidRunner commit: the original source archive omitted it although
 its build script requires it. `rebuild-arm64.sh` uses these local sources without
 fetching moving upstream branches. Requires a Linux/macOS NDK r29 toolchain,
-Python 3, make, patch, tar and SHA-256 tools. Rebuilding/relinking is supported;
-byte-identical reproduction of the supplied donor binaries has NOT been tested.
+Python 3, make, patch, tar and SHA-256 tools. The offline recipe has compiled
+successfully in CI. The resulting files passed ELF/ABI/interpreter/alignment checks
+but were not byte-identical to the supplied donor binaries; no replacement of the
+shipped payload or native runtime acceptance follows from that build result.
 
 Example (run from this directory):
 

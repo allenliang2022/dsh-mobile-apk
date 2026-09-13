@@ -1,0 +1,92 @@
+# Feasibility probe only. A boot/helper pass is NOT Linux guest or release acceptance.
+name: ARM64 Android software feasibility probe
+
+on:
+  push:
+    branches: [feat/native-proot-debian]
+    paths:
+      - .github/workflows/native-proot-arm64-probe.yml
+      - scripts/native-proot-emulator-smoke.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    name: Standard macOS ARM64 software-path probe
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Confirm standard runner architecture
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          mkdir -p arm64-probe-reports
+          printf '%s\n' 'scope=software-path feasibility, not native Linux guest acceptance' > arm64-probe-reports/scope.txt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          architecture: aarch64
+      - uses: android-actions/setup-android@v3
+      - name: Confirm native ARM64 emulator package
+        run: |
+          set -euo pipefail
+          sdkmanager "emulator"
+          backend="$ANDROID_HOME/emulator/qemu/darwin-aarch64/qemu-system-aarch64"
+          test -x "$backend"
+          file "$backend" | tee arm64-probe-reports/emulator-format.txt
+          file "$backend" | grep -q arm64
+          "$ANDROID_HOME/emulator/emulator" -version > arm64-probe-reports/emulator-version.txt 2>&1
+      # Reuse immutable, already validated artifacts. Tested APK source revision is
+      # 98638a2332bf422124e7240d1b8b71d6d0a12e41, not implicitly the probe's HEAD.
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34749351053
+          name: native-proot-review-arm64-v8a
+          path: arm64-probe-input/app
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34749351053
+          name: native-proot-instrumentation-arm64-v8a
+          path: arm64-probe-input/tests
+      - name: Record tested artifact hashes
+        run: |
+          shasum -a 256 arm64-probe-input/app/app-debug.apk arm64-probe-input/tests/app-debug-androidTest.apk > arm64-probe-reports/artifact-sha256.txt
+          printf '%s\n' 'testedApkRevision=98638a2332bf422124e7240d1b8b71d6d0a12e41' >> arm64-probe-reports/scope.txt
+      - name: Bounded ARM64 Android boot and APK-helper probe
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: arm64-v8a
+          ram-size: 2048M
+          cores: 2
+          force-avd-creation: true
+          emulator-boot-timeout: 900
+          disable-animations: true
+          # Explicitly disable HVF as well as requesting ACCEL_OFF: some emulator
+          # revisions still select HVF based on capability detection without both.
+          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -accel off -feature -HVF -verbose
+          script: >-
+            python3 scripts/native-proot-emulator-smoke.py
+            --helper-only --expected-abi arm64-v8a
+            --serial emulator-5554
+            --new-apk arm64-probe-input/app/app-debug.apk
+            --test-apk arm64-probe-input/tests/app-debug-androidTest.apk
+            --out arm64-probe-reports
+      - name: Upload bounded probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-proot-arm64-software-probe
+          path: arm64-probe-reports/
+          if-no-files-found: warn
+          retention-days: 14
