@@ -280,8 +280,4 @@
     并在「被拒非空」或「产出为空」时 `exit 1`。防线 = `scripts/check-build-chain-abort.mjs`（静态逐处断言 +
     `--self-test` 抽真实尾部块用合成状态驱动：被拒→非 0 / 全产出→0 / 零产出→非 0 / 去掉守卫→0 承重反证）。
 
-
-
-
-
-
+95. **单 ABI 快照不能混装多 ABI native payload（native-proot 草稿）**：新增 jniLibs 后，所有 Gradle 构建入口必须显式 targetAbi，产物再核对 native ELF/hash 与 snapshot node ELF；首期 x86_64 无 native PRoot 必须是空集合，不得偷偷塞入源码版本未核实的第三方库。原生路径真源只能是当前 PackageManager.nativeLibraryDir，每次准备刷新原子 state，禁止把旧 /data/app 路径固化在持久脚本。Termux preload 的影响要经新进程清空；不得重试任意非零命令来假装 QEMU 兜底。旧 usr 内 rootfs 会受快照替换影响，不自动迁移、不称其已受保护。见 NATIVE-PROOT.md。

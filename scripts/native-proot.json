@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "license": "GPL-2.0-or-later (PRoot sources); LGPL-3.0-or-later (statically linked talloc); combined executable redistribution under GPL-3.0-or-later",
+  "artifacts": {
+    "arm64-v8a": {
+      "distribution": "m96-chan/DroidRunner v1.0.0",
+      "distributionCommit": "28bec00176724fd132f21bf0f21cd708d4811c57",
+      "sourceRepository": "https://github.com/termux/proot",
+      "sourceCommit": "7266fb3e8516535682f5a9c8f3a7e70f6506eddb",
+      "buildRecipe": "https://github.com/m96-chan/DroidRunner/blob/28bec00176724fd132f21bf0f21cd708d4811c57/runtime/build-proot.sh",
+      "files": {
+        "libproot.so": "7ac60a8fd3627bdf73c1bfa05dfe9a505b521fa77001f735563cf104b38b5ee6",
+        "libproot-loader.so": "b5b856b8b0d00d881d44d9fabfd6386499a607ceb9e8a5b95df94a3a2b7b451e",
+        "libproot-loader32.so": "25f6bd90bc5a3d3088026289a0d3eaf3e502bd2b00e5cb74fadd9791132efa34"
+      },
+      "sourceArchive": "vendor/native-proot/assets/native-proot-source/droidrunner-v1.0.0-source.tar.gz",
+      "sourceArchiveSha256": "35113c4e20d4e00a433d99cbc99de0ce47a16234674592f356d2a64e105f43a6",
+      "distributionUrl": "https://github.com/m96-chan/DroidRunner/releases/download/v1.0.0/droidrunner-v1.0.0.apk",
+      "distributionSha256": "76417607c264e33d92a49adf1cf48569a3973d09dd016756d51a4b44eaa67592",
+      "minAndroidApi": 28,
+      "talloc": {
+        "version": "2.4.3",
+        "sha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
+        "license": "LGPL-3.0-or-later",
+        "linkage": "static"
+      },
+      "validation": {
+        "sourceVerified": true,
+        "publishable": true,
+        "independentlyRebuilt": false,
+        "fullSourceApkTested": false,
+        "nativeArm64SmokeTested": true,
+        "deviceSmokeScope": "Existing 0.13.8 APK repack with these exact three payload hashes; not an end-to-end test of this source branch.",
+        "pageSizeTested": 4096,
+        "loader32Tested": false
+      }
+    }
+  },
+  "unsupportedAbis": {
+    "x86_64": "Existing DSH remains supported without native PRoot. A pinned-source rebuild and emulator validation are required before adding an x86_64 payload; the earlier unverifiable third-party binaries are excluded."
+  }
+}

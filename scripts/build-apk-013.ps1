@@ -22,6 +22,12 @@ if ($Fast) {
 $apkDir = Join-Path $Root "dsh-mobile-apk"
 if (-not (Test-Path $apkDir)) { $apkDir = $Root }
 
+# 源门禁不依赖快照；明确不支持的 ABI 必须无 native payload，不是 SKIP。
+$nativeArgs = @('--root', $apkDir)
+if ($OnlyAbi) { $nativeArgs += @('--abi', $OnlyAbi) }
+node (Join-Path $Root "scripts\check-native-proot.mjs") @nativeArgs
+if ($LASTEXITCODE -ne 0) { throw "native PRoot 来源/哈希/ELF 源门禁失败，拒绝打包" }
+
 # 补丁镜像一致性门禁（0.13.8 PR-A1 / apk #171 残留）：scripts/patches 是双仓镜像面
 # （云端自包含构建用 apk 仓副本），单边演进 = 云端快照静默缺引擎补丁（幽灵缺陷）。
 # registry / apply-patches / README 逐字节 + tests 清单，差异即拒打包。
@@ -102,7 +108,7 @@ if (Test-Path $overlayManifest) {
 # 版本单一来源：build.gradle.kts（0.13.1 踩坑：硬编码 out\v0.13.0 与 $ver 会让纯净版产物错误命名旧版本）
 $GradleVer = (Select-String -Path (Join-Path $apkDir "app\build.gradle.kts") -Pattern 'versionName = "([^"]+)"').Matches[0].Groups[1].Value
 $Out = Join-Path $Root ("out\v" + $GradleVer)
-$apkDir = Join-Path $Root "dsh-mobile-apk"
+# Keep the self-contained/coordinator apkDir resolved above for source and APK checks.
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 # 注入集单一常量（0.13.8-b ST-06 / F-ENV-04）：dirs/externals 都在 scripts/plugin-dirs.json，
@@ -238,8 +244,11 @@ foreach ($abi in @('arm64', 'x86_64')) {
     if ($LASTEXITCODE -ne 0) { throw "快照指纹对账失败（$abi）：tar 与声明值不一致，拒绝打包" }
     Push-Location $apkDir
     try {
-        & .\gradlew :app:assembleDebug --no-daemon -PversionNameSuffix="$Suffix" 2>&1 | Select-Object -Last 4
+        $androidAbi = if ($abi -eq 'arm64') { 'arm64-v8a' } else { 'x86_64' }
+        & .\gradlew :app:assembleDebug --no-daemon -PversionNameSuffix="$Suffix" -PtargetAbi="$androidAbi" 2>&1 | Select-Object -Last 4
         if ($LASTEXITCODE -ne 0) { throw "gradle 构建失败（$abi）" }
+        node (Join-Path $Root "scripts\check-native-proot.mjs") --root $apkDir --abi $abi --apk (Join-Path $apkDir "app\build\outputs\apk\debug\app-debug.apk")
+        if ($LASTEXITCODE -ne 0) { throw "APK native/manifest/snapshot 完整性门禁失败（$abi），禁止交付" }
         $ver = "$GradleVer$Suffix"
         Copy-Item "app\build\outputs\apk\debug\app-debug.apk" (Join-Path $Out "dsh-mobile-apk-v$ver-$abi.apk") -Force
         Write-Host "产物: $Out\dsh-mobile-apk-v$ver-$abi.apk"

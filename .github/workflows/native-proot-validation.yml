@@ -1,0 +1,90 @@
+# Targeted source-branch validation only; never installs on a device or publishes a Release.
+name: Native PRoot validation
+
+on:
+  push:
+    branches: [feat/native-proot-debian]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Native PRoot review (${{ matrix.targetAbi }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - targetAbi: arm64-v8a
+            logicalAbi: arm64
+            snapshotSha256: ed24dfcc004725dee4c41e6b9d139fa10e97455af270187794f838327caec28f
+          - targetAbi: x86_64
+            logicalAbi: x86_64
+            snapshotSha256: 8409612269a56e7529da6527e153744c161a235be6679b2d3d5219d17f63be79
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false # base/*.tar.xz is not needed; use the pinned public release snapshot below.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Offline launcher and gate fixtures, then source provenance/ELF gate
+        run: |
+          set -euo pipefail
+          node scripts/tests/native-proot-launcher.test.mjs
+          node scripts/tests/native-proot-gate.test.mjs
+          node scripts/check-native-proot.mjs --abi "${{ matrix.targetAbi }}"
+
+      - name: Download and verify pinned public snapshot
+        env:
+          ABI: ${{ matrix.logicalAbi }}
+          EXPECTED_SHA256: ${{ matrix.snapshotSha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/assets
+          curl --fail --location --retry 3 --max-time 600 \
+            "https://github.com/kelai141/dsh-mobile-apk/releases/download/v0.14.0-preview/snapshot-${ABI}.tar.xz" \
+            --output app/src/main/assets/snapshot.tar.xz
+          printf '%s  %s\n' "$EXPECTED_SHA256" app/src/main/assets/snapshot.tar.xz | sha256sum --check --strict
+          printf '%s\n' "$EXPECTED_SHA256" > app/src/main/assets/snapshot.sha256
+
+      - name: JVM tests and single-ABI source APK
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace \
+            -PtargetAbi="${{ matrix.targetAbi }}" -PversionNameSuffix=-native-proot-review
+
+      - name: Verify actual APK before making a dev artifact
+        run: node scripts/check-native-proot.mjs --abi "${{ matrix.targetAbi }}" --apk app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload JVM test reports even when validation fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-proot-junit-${{ matrix.targetAbi }}
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload validated dev APK (not a Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-proot-review-${{ matrix.targetAbi }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

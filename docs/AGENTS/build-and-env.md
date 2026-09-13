@@ -106,3 +106,9 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 | run-as 限制 | run-as 裸环境无 termux-exec 钩子 → `not executable: 64-bit ELF` / `CANNOT LINK` 是**假错误**；验证快照内二进制须带全套引擎 env（`LD_PRELOAD` + `TERMUX_EXEC__*` + `LD_LIBRARY_PATH` + `OPENSSL_CONF`） | 坑 22 |
 | PowerShell 转义 | 双引号内 `$var` 本地展开（引号地狱）；二进制经 `adb exec-out`/push 传输 | 坑 8 |
 | ABI 匹配 | debug 包默认 x86_64 快照，装 arm64 真机必崩；构建/安装前核对（3.2 步 4） | 坑 18 |
+
+## Native PRoot build addition (review draft)
+
+Pass `-PtargetAbi=arm64-v8a|x86_64` to Gradle; logical arm64 is mapped by builders. Direct Gradle defaults to x86_64 and requires a matching snapshot. First native payload is ARM64/API28+ only; x86_64 is explicitly empty and still checked. Before packaging run `node scripts/check-native-proot.mjs --abi <abi>`; after packaging run its `--apk <file>` mode before upload. Source/script/hash inputs and current validation boundaries: `docs/NATIVE-PROOT.md`. The private coordination mirror requires a paired maintainer change; do not waive its gate.
+
+Update record: 2026-09-13 — native-proot draft, ABI plumbing and truthful validation boundary.

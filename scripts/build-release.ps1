@@ -134,10 +134,12 @@ foreach ($abi in @(@{n='arm64-v8a'; f=$armSnap}, @{n='x86_64'; f=$x86Snap})) {
   node (Join-Path $root "scripts\check-snapshot-fingerprint.mjs") --require
   if ($LASTEXITCODE -ne 0) { throw ("快照指纹对账失败（" + $abi.n + "）：tar 与声明值不一致，中止组装") }
   Push-Location (Join-Path $root "dsh-mobile-apk")
-  & $Gradle assembleDebug --offline --no-daemon --rerun-tasks 2>$null | Out-Null
+  & $Gradle assembleDebug --offline --no-daemon --rerun-tasks -PtargetAbi=$($abi.n) 2>$null | Out-Null
   if ($LASTEXITCODE -ne 0) { throw ("APK build failed (" + $abi.n + ")") }
   Pop-Location
   $apk = Get-ChildItem (Join-Path $root "dsh-mobile-apk\app\build\outputs\apk\debug\app-debug.apk") | Select-Object -First 1
+  node (Join-Path $root "scripts\check-native-proot.mjs") --root (Join-Path $root "dsh-mobile-apk") --abi $abi.n --apk $apk.FullName
+  if ($LASTEXITCODE -ne 0) { throw ("APK native/manifest/snapshot 完整性门禁失败（" + $abi.n + "），禁止交付") }
   Copy-Item $apk.FullName (Join-Path $apkDir ("dsh-mobile-apk-v" + $Version + "-" + $abi.n + ".apk")) -Force
 }
 

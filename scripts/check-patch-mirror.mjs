@@ -149,6 +149,12 @@ if (peer) {
   // 单边演进同样造成「云端自包含构建跑旧门禁/旧脚本」的幽灵面——本仓曾出现
   // bounded-io 门禁只落在 apk 兜、协调仓脚本仍带 Join-Path 拼写缺陷而无人察觉。
   // 对端缺该文件时跳过（apk 仓独占脚本合法）。
+  // The native gate is newly mandatory: a checked-out peer missing it is drift, not SKIP.
+  const REQUIRED_NATIVE_MIRRORS = new Set([
+    'scripts/check-native-proot.mjs', 'scripts/native-proot.json',
+    'scripts/lib/native-proot-elf.mjs', 'scripts/lib/check-native-proot-apk.py',
+    'scripts/tests/native-proot-gate.test.mjs',
+  ])
   const MIRROR_TOP = [
     'scripts/build-apk-013.ps1',
     // ST-06 纳入镜像面：云端自包含构建链自身也是「单边演进 = 幽灵缺陷」面（此前只在 apk 仓存在、
@@ -192,6 +198,11 @@ if (peer) {
     'scripts/check-tool-output-schema.mjs',
     'scripts/check-control-ops.mjs',
     'scripts/check-release-gates.mjs',
+    'scripts/check-native-proot.mjs',
+    'scripts/native-proot.json',
+    'scripts/lib/native-proot-elf.mjs',
+    'scripts/lib/check-native-proot-apk.py',
+    'scripts/tests/native-proot-gate.test.mjs',
     'scripts/control-ops-known-gaps.json',
     'scripts/control-ops-pending.json',
     'scripts/check-inject-completeness.mjs',
@@ -240,7 +251,11 @@ if (peer) {
       check(`镜像目录内容一致: ${rel}`, badContent.length === 0, '内容漂移: [' + badContent.slice(0, 5).join(', ') + ']')
       continue
     }
-    if (!existsSync(theirs)) { skip(`镜像一致: ${rel}（对端无此文件）`); continue }
+    if (!existsSync(theirs)) {
+      if (REQUIRED_NATIVE_MIRRORS.has(rel)) check(`native 门禁镜像在场: ${rel}`, false, '对端缺必需门禁/metadata/helper/fixture，必须同批同步')
+      else skip(`镜像一致: ${rel}（对端无此文件）`)
+      continue
+    }
     try {
       const r = cmp(mine, theirs)
       check(`镜像一致: ${rel}`, r !== 'content', r === 'eol' ? '仅行尾差异（见告警）' : undefined)

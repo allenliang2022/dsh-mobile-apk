@@ -32,6 +32,8 @@ jobs:
     steps:
       # ---- checkout：apk 自身 + root 脚本 + 3 插件仓（path 必须在 workspace 内）----
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: actions/checkout@v4
         with:
           repository: kelai141/dsh-mobile
@@ -67,6 +69,11 @@ jobs:
           # Node 22+: tsdown loads tsdown.config.ts via native TS (Node 20 falls
           # back to the optional `unrun` loader, which npm ci does not install).
           node-version: 22
+
+      - name: Native PRoot 源门禁与离线负控（无快照依赖）
+        run: |
+          node scripts/check-native-proot.mjs
+          node scripts/tests/native-proot-gate.test.mjs
 
       # ---- 版本号：build.gradle.kts 基础值 + 快照后缀 ----
       - name: 版本号
@@ -140,7 +147,8 @@ jobs:
             SNAP=${pair##*:}
             cp "snapshot/${SNAP}" app/src/main/assets/snapshot.tar.xz
             sha256sum "snapshot/${SNAP}" | awk '{print $1}' > app/src/main/assets/snapshot.sha256
-            ./gradlew :app:assembleDebug --no-daemon --rerun-tasks -PversionNameSuffix="${{ inputs.version_suffix }}"
+            ./gradlew :app:assembleDebug --no-daemon --rerun-tasks -PversionNameSuffix="${{ inputs.version_suffix }}" -PtargetAbi="$ABI"
+            node scripts/check-native-proot.mjs --abi "$ABI" --apk app/build/outputs/apk/debug/app-debug.apk
             cp app/build/outputs/apk/debug/app-debug.apk "out/apk/dsh-mobile-apk-v${VER}-${ABI}.apk"
           done
           cp snapshot/snapshot-arm64.tar.xz out/snapshot/

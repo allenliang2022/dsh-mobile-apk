@@ -103,3 +103,11 @@
 |---|---|---|---|
 | @napi-rs/canvas | 1.0.8 | MIT | [Brooooooklyn/canvas](https://github.com/Brooooooklyn/canvas) |
 | @napi-rs/canvas-android-arm64 | 1.0.8 | MIT | [Brooooooklyn/canvas](https://github.com/Brooooooklyn/canvas)（napi android-arm64 预编译 binding） |
+
+## Optional APK-native PRoot (ARM64)
+
+- PRoot `7266fb3e8516535682f5a9c8f3a7e70f6506eddb`, GPL-2.0-or-later, plus statically linked talloc 2.4.3, LGPL-3.0-or-later; the combined executable is redistributed under GPL-3.0-or-later.
+- Exact donor: DroidRunner v1.0.0 (`28bec00176724fd132f21bf0f21cd708d4811c57`); binary and corresponding-source hashes: `scripts/native-proot.json`.
+- Corresponding source, original patches/build script, additional required cross-answers and offline rebuild/relink recipe are supplied in `vendor/native-proot/assets/native-proot-source/` and APK `assets/native-proot-source/`; original copyright and licence notices are retained.
+- Native binaries are executed in a separate process. No Debian rootfs, QEMU or user files are part of this native payload. x86_64 native PRoot is not supplied.
+- Full source-branch device/build validation is pending; provenance checks are not a claim of complete certification. See `docs/NATIVE-PROOT.md`.

@@ -1,0 +1,78 @@
+#!/system/bin/sh
+# Stable launcher: PackageManager refreshes private state; no APK install path is
+# baked here. PRoot is a compatibility tool, NOT a security sandbox.
+# An already loaded termux-exec hook survives unset. Always exec a NEW clean
+# system shell. No inherited CLEAN marker can bypass this transition.
+STATE=${DSH_NATIVE_PROOT_STATE:-/data/data/com.dsharnessmobile.shell/files/native-proot.env}
+PREPARE_ERROR=${DSH_NATIVE_PROOT_ERROR:-}
+GUEST_TERM=${TERM:-xterm-256color}
+unset LD_PRELOAD LD_LIBRARY_PATH TERMUX_EXEC__EXECVE_CALL__INTERCEPT TERMUX_EXEC__SYSTEM_LINKER_EXEC__MODE
+exec /system/bin/env -i PATH=/system/bin DSH_NATIVE_PROOT_STATE="$STATE" \
+  DSH_NATIVE_PROOT_ERROR="$PREPARE_ERROR" TERM="$GUEST_TERM" /system/bin/sh -c '
+umask 077
+usage() {
+  printf "%s\n" "usage: dsh-debian [--rootfs ABSOLUTE_PATH] [--bind-sdcard] [--] [COMMAND ...]" \
+    "Default rootfs: files/home/.dsh/workspaces/debian-rootfs (managed separately)." \
+    "--bind-sdcard explicitly exposes /storage/emulated/0 at /sdcard; off by default." \
+    "PRoot is not a security sandbox. Commands run once, without QEMU fallback."
+}
+fail() { printf "%s\n" "$2" >&2; exit "$1"; }
+ROOTFS_OVERRIDE=
+BIND_SDCARD=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    --rootfs)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      case "$2" in /*) ROOTFS_OVERRIDE=$2 ;; *) fail 2 "--rootfs requires an absolute path." ;; esac
+      shift 2 ;;
+    --bind-sdcard) BIND_SDCARD=1; shift ;;
+    --) shift; break ;;
+    -*) usage >&2; fail 2 "Unknown launcher option; use -- before a command beginning with a dash." ;;
+    *) break ;;
+  esac
+done
+[ -z "$DSH_NATIVE_PROOT_ERROR" ] || fail 126 "Native PRoot state refresh failed ($DSH_NATIVE_PROOT_ERROR); stale state will not be used."
+STATE=$DSH_NATIVE_PROOT_STATE
+[ -f "$STATE" ] && [ -r "$STATE" ] || fail 126 "Native PRoot state is missing; open a new DSH console after the runtime has been prepared."
+# This is app-private generated path data, not a dump of the engine environment.
+. "$STATE"
+[ "${DSH_NATIVE_PROOT_STATE_VERSION:-}" = 1 ] || fail 126 "Native PRoot state is outdated; refresh it through the Android app."
+case "${DSH_PROOT_BIN:-}" in /*) ;; *) fail 126 "Native PRoot state has no absolute APK payload path." ;; esac
+case "${PROOT_LOADER:-}" in /*) ;; *) fail 126 "Native PRoot state has no absolute APK loader path." ;; esac
+case "${PROOT_TMP_DIR:-}" in /*) ;; *) fail 126 "Native PRoot state has no absolute temporary directory." ;; esac
+if [ ! -f "$DSH_PROOT_BIN" ] || [ ! -x "$DSH_PROOT_BIN" ] || [ ! -f "$PROOT_LOADER" ] || [ ! -x "$PROOT_LOADER" ]; then
+  fail 126 "Native PRoot payload is unavailable at the current PackageManager path; a matching APK payload is required."
+fi
+ROOTFS=${ROOTFS_OVERRIDE:-${DSH_DEBIAN_ROOTFS:-}}
+case "$ROOTFS" in /*) ;; *) fail 126 "Native PRoot state has no absolute default rootfs path." ;; esac
+# A guest shell may be an absolute symlink which only resolves INSIDE the rootfs.
+# Do not reject that solely because host test -x cannot resolve its guest target.
+if [ ! -d "$ROOTFS" ] || { [ ! -f "$ROOTFS/bin/sh" ] && [ ! -L "$ROOTFS/bin/sh" ]; }; then
+  printf "Debian rootfs not found or incomplete: %s\n" "$ROOTFS" >&2
+  if [ -n "${DSH_DEBIAN_LEGACY_ROOTFS:-}" ] && [ -d "$DSH_DEBIAN_LEGACY_ROOTFS" ]; then
+    printf "Existing legacy rootfs: %s\n" "$DSH_DEBIAN_LEGACY_ROOTFS" >&2
+    printf "%s\n" "Select it explicitly with --rootfs PATH; automatic migration is disabled." >&2
+  fi
+  fail 1 "No rootfs was created, moved or deleted."
+fi
+if [ "$BIND_SDCARD" = 1 ] && [ ! -d /storage/emulated/0 ]; then
+  fail 1 "--bind-sdcard requested but /storage/emulated/0 is unavailable."
+fi
+[ ! -L "$PROOT_TMP_DIR" ] || fail 126 "Native PRoot temporary directory must not be a symlink."
+/system/bin/mkdir -p "$PROOT_TMP_DIR" || fail 126 "Cannot create the Native PRoot temporary directory."
+/system/bin/chmod 700 "$PROOT_TMP_DIR" || fail 126 "Cannot restrict the Native PRoot temporary directory permissions."
+export PROOT_LOADER PROOT_TMP_DIR
+unset PROOT_LOADER_32
+# This same-directory, build-validated optional loader does not promise 32-bit support.
+if [ -n "${DSH_PROOT_LOADER32:-}" ] && [ -f "$DSH_PROOT_LOADER32" ] && [ -x "$DSH_PROOT_LOADER32" ]; then
+  export PROOT_LOADER_32="$DSH_PROOT_LOADER32"
+fi
+[ "$#" -gt 0 ] || set -- /bin/bash --login
+set -- -w /root /usr/bin/env -i HOME=/root USER=root LOGNAME=root TERM="$TERM" \
+  LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "$@"
+[ "$BIND_SDCARD" = 0 ] || set -- -b /storage/emulated/0:/sdcard "$@"
+set -- --kill-on-exit --link2symlink -0 -r "$ROOTFS" -b /dev -b /proc -b /sys "$@"
+# Exactly one exec: preserve argv boundaries and the command exit status, even on error.
+exec "$DSH_PROOT_BIN" "$@"
+' "$0" "$@"

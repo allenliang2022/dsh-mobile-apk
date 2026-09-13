@@ -66,3 +66,9 @@
 - **对二进制的再加工**（A4，全部随本仓库开源）：前缀/编译期路径重写 `scripts/fix-shebang.py`、`scripts/inject-snapshot.py`、`termux-elf-cleaner` 调用与 `scripts/build-snapshot-013.mjs`（shebang/RUNPATH/elf 处理）、快照注入与打包 `scripts/build-apk-013.ps1`、`scripts/patch-marketplace.mjs`、`scripts/patch-undo-mobile.mjs`；
 - **门禁**：`scripts/check-third-party.mjs`（矩阵覆盖 + copyleft 全文在场）已在 `build-apk-013.ps1` 接入，缺失即拒绝打包；
 - **无额外限制**：上述二进制保持其上游许可，未施加任何附加条款；本工程 dsh 引擎/壳/插件（MIT 系）与 GPL 二进制为进程级聚合，非链接派生，不受传染（详 THIRD_PARTY_NOTICES.md 说明）。
+
+## Native PRoot release addition (not yet release-certified)
+
+ARM64 native support requires Android API28+. x86_64 must ship no native PRoot until verified binaries and emulator tests exist; host DSH remains supported. All build paths must pass targetAbi and check the final APK with `check-native-proot.mjs --abi <abi> --apk <file>` before copying/uploading. This is in addition to existing snapshot/mirror/security gates, not a waiver of them.
+
+Keep `native-proot-source/` source/licence/rebuild assets in the APK and redistribution. Validate source-built ARM64 startup, x86 host regression and snapshot-upgrade data preservation before release. Prior ARM64 hotfix smoke does not certify the new Kotlin integration. Do not install or restart a user's app without coordinating that action.

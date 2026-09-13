@@ -1249,7 +1249,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 显式取 min(8, cores)（见 uvThreadPoolSize）：零产品语义改动，引擎与所有工具子进程
       // 经 shellEnv() 一并继承。判据：子进程回读 process.env.UV_THREADPOOL_SIZE = min(8, cores)。
       "UV_THREADPOOL_SIZE" to uvThreadPoolSize(Runtime.getRuntime().availableProcessors()).toString(),
-    ) + certEnv
+    ) + certEnv + NativeProot.prepare(context, usrDir)
   }
 
   companion object {

@@ -18,7 +18,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { mkdirSync, existsSync, rmSync, copyFileSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, existsSync, rmSync, copyFileSync, writeFileSync, readFileSync, readdirSync, createReadStream } from 'node:fs'
 import { createHash } from 'node:crypto'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -61,6 +61,7 @@ const modelSync = externalNamed('dsh-model-sync')
 // 门禁集（唯一声明处；check-release-gates.mjs 断言与 build-apk-013.ps1 的差集 = 0）
 const GATE_SCRIPTS = [
   'check-patch-mirror.mjs',
+  'check-native-proot.mjs',
   'check-snapshot-fingerprint.mjs',
   'check-manifest-hardening.mjs',
   'check-bounded-io.mjs',
@@ -123,6 +124,8 @@ if (DRY_RUN) {
 }
 
 try {
+  log('门禁：native PRoot 来源/哈希/ELF（不依赖快照）…')
+  run('node', [gate('check-native-proot.mjs'), '--root', apkDir, '--abi', ABI])
   mkdirSync(OUT, { recursive: true })
   mkdirSync(work, { recursive: true })
 
@@ -219,7 +222,9 @@ try {
   rmSync(join(apkDir, 'app', 'build', 'intermediates', 'assets'), { recursive: true, force: true })
   rmSync(join(apkDir, 'app', 'build', 'outputs', 'apk', 'debug'), { recursive: true, force: true })
   copyFileSync(snapIn, join(apkDir, 'app', 'src', 'main', 'assets', 'snapshot.tar.xz'))
-  const sha = createHash('sha256').update(readFileSync(snapIn)).digest('hex')
+  const snapshotHash = createHash('sha256')
+  for await (const bytes of createReadStream(snapIn)) snapshotHash.update(bytes)
+  const sha = snapshotHash.digest('hex')
   writeFileSync(join(apkDir, 'app', 'src', 'main', 'assets', 'snapshot.sha256'), sha, 'ascii')
   log(`snapshot.sha256 = ${sha}`)
   // ST-04 严格复核：本 ABI 的 tar 与刚写入的声明值必须逐字节一致（--require：缺件即失败，不得 SKIP）。
@@ -228,8 +233,12 @@ try {
   // ---- 7. gradle assembleDebug（跨平台 gradlew）----
   log('构建 APK…')
   const gradleCmd = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
-  const gr = spawnSync(gradleCmd, [':app:assembleDebug', '--no-daemon', `-PversionNameSuffix=${SUFFIX}`], { cwd: apkDir, stdio: 'inherit', shell: process.platform === 'win32' })
+  const androidAbi = ABI === 'arm64' ? 'arm64-v8a' : 'x86_64'
+  const gr = spawnSync(gradleCmd, [':app:assembleDebug', '--no-daemon', `-PversionNameSuffix=${SUFFIX}`, `-PtargetAbi=${androidAbi}`], { cwd: apkDir, stdio: 'inherit', shell: process.platform === 'win32' })
   if (gr.status !== 0) { console.error(`gradle 失败 (${gr.status})`); process.exit(1) }
+
+  // Postbuild must validate the actual APK before copying/delivering any artifact.
+  run('node', [gate('check-native-proot.mjs'), '--root', apkDir, '--abi', ABI, '--apk', join(apkDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')])
 
   // ---- 8. 产物拷贝（产物名与输出目录都来自 gradle 真源）----
   const name = `dsh-mobile-apk-v${VER}${SUFFIX}-${ABI}.apk`

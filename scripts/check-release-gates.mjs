@@ -27,6 +27,7 @@ const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
 /** 本迭代要求的门禁集合（唯一声明处）。needsSnapshot=true 的门禁由构建/发布链调用，CI 不跑。 */
 const GATES = [
   { script: 'check-patch-mirror.mjs', ci: true, needsSnapshot: false },
+  { script: 'check-native-proot.mjs', ci: true, needsSnapshot: false },
   { script: 'check-manifest-hardening.mjs', ci: true, needsSnapshot: false },
   { script: 'check-bounded-io.mjs', ci: true, needsSnapshot: false },
   { script: 'check-snapshot-fingerprint.mjs', ci: true, needsSnapshot: true },
@@ -95,6 +96,25 @@ for (const pos of POSITIONS) {
   const missing = pos.gates.filter((g) => !text.includes(g))
   check(pos.id + ' 门禁集 ⊇ 声明集合（' + pos.gates.length + ' 项）', missing.length === 0,
     '未接线: ' + missing.join(', '))
+}
+
+// Native PRoot: each direct Gradle entry must select an ABI and validate the actual APK
+// before its first delivery copy. Merely mentioning the source gate is insufficient.
+for (const [file, buildMarker, copyMarker] of [
+  ['scripts/build-apk.mjs', 'spawnSync(gradleCmd,', 'copyFileSync(join(apkDir,'],
+  ['scripts/build-apk-013.ps1', '& .\\gradlew :app:assembleDebug', 'Copy-Item "app\\build\\outputs'],
+  ['scripts/build-release.ps1', '& $Gradle assembleDebug', 'Copy-Item $apk.FullName'],
+  ['.github/workflows/build-snapshot.yml', './gradlew :app:assembleDebug', 'cp app/build/outputs/apk/debug/app-debug.apk'],
+  ['dsh-mobile-apk/.github/workflows/native-proot-validation.yml', './gradlew :app:testDebugUnitTest', '- name: Upload validated dev APK'],
+]) {
+  const text = readOrFail(file)
+  if (text === null) continue
+  const start = text.indexOf(buildMarker)
+  const delivery = text.indexOf(copyMarker, start)
+  const interval = start >= 0 && delivery > start ? text.slice(start, delivery) : ''
+  check(file + ' targetAbi + APK postbuild gate before delivery',
+    interval.includes('-PtargetAbi=') && /check-native-proot\.mjs[\s\S]{0,300}--apk/.test(interval),
+    'Gradle must pass targetAbi; actual --apk validation must precede copy/upload')
 }
 
 // ── 2. $pluginSrcs ⊇ $pluginDirs（构建/发布章 F-ENV-13）────────────────────

@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        abi: [arm64, x86_64]
+        abi: ${{ fromJSON(github.event.inputs.abi == 'both' && '["arm64","x86_64"]' || format('["{0}"]', github.event.inputs.abi)) }}
       fail-fast: false
     env:
       # build-apk.mjs 依赖本仓库顶层 scripts/plugins/vendor/base；apk 仓库 = $GITHUB_WORKSPACE
@@ -53,6 +53,11 @@ jobs:
       - name: 准备 Java（gradle 需要）
         uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
+
+      - name: Native PRoot 源门禁与离线负控
+        run: |
+          node scripts/check-native-proot.mjs --abi "${{ matrix.abi }}"
+          node scripts/tests/native-proot-gate.test.mjs
 
       - name: 构建插件（6 个含 build 脚本的；dsh-host-web-compat 用已提交 lib）
         shell: bash
@@ -87,6 +92,15 @@ jobs:
         run: |
           set -e
           node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "${{ github.event.inputs.suffix }}"
+
+      - name: APK 完整性复核（native bytes / binary manifest / snapshot ABI）
+        shell: bash
+        run: |
+          set -euo pipefail
+          for apk in out/v*/*-${{ matrix.abi }}.apk; do
+            test -f "$apk"
+            node scripts/check-native-proot.mjs --abi "${{ matrix.abi }}" --apk "$apk"
+          done
 
       - name: 上传 APK 产物（本地下载 debug；不出 Release）
         uses: actions/upload-artifact@v4

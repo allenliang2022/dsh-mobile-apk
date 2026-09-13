@@ -19,6 +19,14 @@ bridge, keep-alive foreground service, engine watchdog, and online runtime updat
 install: it boots a full dsh web agent that can really execute bash. App name `DeepCode` (icon text
 DeepSearch), package `com.dsharnessmobile.shell`, version `0.13.0-fx-1` (versionCode 26).
 
+## Optional native Debian support (experimental branch)
+
+This branch adds an ARM64 / Android API28+ APK-native PRoot path. It does not
+replace the Termux engine, ship/download a Debian rootfs, or enable real root.
+x86_64 keeps the existing host functionality without a native PRoot payload.
+See [NATIVE-PROOT.md](docs/NATIVE-PROOT.md) for usage, data-lifecycle boundaries
+and the outstanding source-built APK acceptance checks.
+
 ## Features
 
 - **Embedded runtime** — xz snapshot (arm64 151.6 MB / x86_64 158.9 MB) bundling node + git + bash +

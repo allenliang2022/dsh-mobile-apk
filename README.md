@@ -19,6 +19,12 @@
 运行时在线更新。一个 APK 装完即用：完整的 dsh web agent，且能真实执行 bash。应用名 `DeepCode`
 （图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`、版本 `0.13.0-fx-1`（versionCode 26）。
 
+## 原生 Debian 支持（实验性）
+
+本分支新增可选 ARM64/Android 9+ 原生 PRoot 启动路径；不替换现有 Termux 引擎，
+不自带或自动下载 Debian。x86_64 保留原有功能，不提供 native PRoot。
+使用、rootfs 升级保护边界与尚未完成的发布验收见 [NATIVE-PROOT.md](docs/NATIVE-PROOT.md)。
+
 ## 功能
 
 - **内嵌运行时**：xz 快照（arm64 151.6MB / x86_64 158.9MB）内置 node + git + bash + coreutils +

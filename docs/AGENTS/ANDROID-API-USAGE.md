@@ -50,14 +50,14 @@ MainActivity 31 / OverlayService 20 / OverlayPanel 15 / ConsoleActivity 15 / Gui
 | setSilent / setTimeoutAfter / setPublicVersion / setAuthenticationRequired | NotificationCompat 面（API 26+ 直用） | setSilent 是静默类第二道保险；setTimeoutAfter 只撤弹窗不发 rejected；setAuthenticationRequired 在 APPROVAL_REQUIRE_UNLOCK=true 时启用（B4 NT-18） |
 | forceDark / GradientDrawable.setColors(colors, offsets) | API 29 | 分支降级（MainActivity.kt:330、ConsoleActivity.kt:90、OverlayHalo.kt:41） |
 | 沉浸式 WindowInsetsController vs systemUiVisibility | API 30 | 双路分支（MainActivity.kt:243-268、WebUiChrome.kt:17-32） |
-| security.android.exec xattr 补章 | Android 15+ 强制 | 无条件 setfattr 尽力而为（SnapshotExtractor.kt 类注释；不 enforcing 的内核为 no-op） |
+| APK-native PRoot（可选） | API 28+，仅 ARM64 payload | nativeLibraryDir + extractNativeLibs；不能靠 app-data chmod/xattr 解除 execve 限制；SnapshotExtractor 不写该 security xattr |
 | SYSTEM_ALERT_WINDOW | 全等级 | Settings.canDrawOverlays + 授权页引导 + onResume 补启（OverlayController.kt:33-65、MainActivity.kt:206） |
 | WRITE_EXTERNAL_STORAGE | maxSdk 29 | manifest 分代声明（分区存储后不再需要） |
 | READ_EXTERNAL_STORAGE | maxSdk 32 | Android 13+ 并入 READ_MEDIA_* 且工作区走 All Files Access |
 
 ## 5. SDK 档位理由（app/build.gradle.kts:13-16 注释为权威）
 
-- **targetSdk 34**：Android 15+ 对 targetSdk 35+ 禁止 exec 应用数据目录 ELF（w^x）——内嵌引擎的 node/bash/全部子命令都是 app-data ELF，升 35 需要全部套 /system/bin/linker64 包装（现有回退只兜底直 exec 被拒场景，EngineManager.kt:581-598）；34 保有 Android 15/16 设备上的原生 exec。配套措施：SnapshotExtractor 对每个可执行文件补 security.android.exec 属性。
+- **targetSdk 34**：维持既有目标版本，但它不豁免 Android 10+/target29+ 的 app-data execve 策略。普通 Bionic 引擎继续使用现有 linker64/termux-exec；可选 PRoot 的静态 loader 从 PackageManager 的 APK 原生目录执行。SnapshotExtractor 的现行源码只设置普通文件模式，不补 security.android.exec xattr。
 - **minSdk 26**：TYPE_APPLICATION_OVERLAY（悬浮球三窗口）与 NotificationChannel 均 API 26 起步；低于 26 需两套 overlay/通知降级路径，与壳定位（Android 8+ 设备）不符。
 - **compileSdk 36**：跟随最新 SDK 编译取新 API 签名与 lint 规则；运行时行为由 targetSdk 34 封顶（gradle.properties 以 suppressUnsupportedCompileSdk=36 压制告警）。
 

@@ -3,6 +3,14 @@ plugins {
   id("org.jetbrains.kotlin.android")
 }
 
+// Every release APK carries one architecture-specific runtime snapshot. Keep the
+// APK native payload on that exact ABI too; a universal native payload paired with
+// a single-ABI snapshot is an install/runtime trap (AGENTS gotchas 18/30/95).
+val targetAbi = providers.gradleProperty("targetAbi").getOrElse("x86_64")
+require(targetAbi in setOf("arm64-v8a", "x86_64")) {
+  "targetAbi must be arm64-v8a or x86_64, got: $targetAbi"
+}
+
 android {
   namespace = "com.dsharnessmobile.shell"
   compileSdk = 36
@@ -10,9 +18,9 @@ android {
   defaultConfig {
     applicationId = "com.dsharnessmobile.shell"
     minSdk = 26
-    // targetSdk 34: Android 15+ forbids exec of app-data ELF for targetSdk 35+
-    // (the embedded engine, bash, and every child command would need linker64
-    // wrappers); 34 keeps native exec working on Android 15/16 devices.
+    // Retain the existing target SDK. Android 10+ can deny execve of app-data
+    // for apps targeting API 29+, including 34: host Bionic executables use the
+    // existing linker/termux-exec path; optional PRoot uses APK-native payloads.
     targetSdk = 34
     // 0.14.0-preview：versionCode 38（覆盖安装 0.13.8(37)）。本版主题（迭代计划
     // docs/NEXT-ITERATION-PLAN-2026-09-12.md 的切片 1 = B0+B1+B2）：
@@ -32,6 +40,19 @@ android {
     // 0.14.0-preview：虚拟屏 P0 建屏矩阵走仪器测试入口（app UID 下运行 = P0-6 要测的调用者身份），
     // 不新增任何产品面（Activity/Bridge/Manifest 均不动）。见 .deploy-tmp/iter-0140/vdisplay-p0.md §8.8。
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    ndk {
+      abiFilters += targetAbi
+    }
+  }
+
+  // PRoot and its static loader must be real PackageManager-extracted files under
+  // ApplicationInfo.nativeLibraryDir (apk_data_file). Android 10+ denies execve()
+  // from writable app-data even at mode 0700.
+  packaging {
+    jniLibs {
+      useLegacyPackaging = true
+      keepDebugSymbols += "**/libproot*.so"
+    }
   }
 
   buildFeatures {
@@ -40,6 +61,9 @@ android {
     // 惰性：当前无 Kotlin 引用该 aidl 时也不会产生额外产物。
     aidl = true
   }
+
+  // Corresponding PRoot/talloc source and the rebuild inputs travel with the APK.
+  sourceSets.getByName("main").assets.srcDir(rootProject.file("vendor/native-proot/assets"))
 
   androidResources {
     // snapshot.tar.xz is already xz-compressed; double-compressing it breaks openFd.

@@ -39,6 +39,7 @@
 | 文件 | 行数 | 职责一句话 | 被引用 |
 |---|---|---|---|
 | EngineManager.kt | 968 | 快照部署/指纹刷新/引擎 spawn（linker64 回退 :597-598）/shellEnv(:858)/运行时补丁(:409)/坏 seed 迁移(:692) | AdbState、EngineService、EngineStartFlow、ConsoleSession、MainActivity、UpdateManager、UndoGate |
+| NativeProot.kt | — | Optional native path resolver and atomic launcher preparation; main Termux engine unchanged | EngineManager.shellEnv |
 | EngineService.kt | 160 | 前台服务 + 5s 看门狗 tick（scheduleWithFixedDelay :97-128）+ onTaskRemoved 礼仪 | BootReceiver、EngineStartFlow、MainActivity、WatchdogV2、UpdateManager（注释） |
 | WatchdogV2.kt | 160 | 深度探活/熔断指数退避（12 次阈值）/PARTIAL_WAKE_LOCK(:125) | EngineService、BootReceiver、EngineStartFlow、UndoGate、GuideChrome（注释） |
 | UndoGate.kt | 160 | 连败 6 次急救回退：调 assets/undo-emergency.mjs restore-last-good（幂等/防循环） | EngineService、EngineStartFlow、EngineManager（注释）、AdbState（注释） |
@@ -102,3 +103,7 @@ AI 工具（dsh-android-manage）
 ```
 
 两条通道**等价且无障碍优先**（PRD-0.13.2 §3.3 B3）；授权面在设置页「设备控制授权」：无障碍为主入口，ADB 折叠为高级/脚本面。
+
+## Optional native runtime assets
+
+`app/src/main/jniLibs/arm64-v8a` holds the pinned engine/loader pair plus loader32. `native-proot/dsh-debian` is a launcher asset. `vendor/native-proot/assets/native-proot-source/` is an extra asset root for corresponding source and licences. x86_64 contains no PRoot; Gradle ABI filter and final APK gates prevent native/snapshot mixing. New default rootfs is the preserved user workspace, never automatically migrated from usr. See `docs/NATIVE-PROOT.md`.

@@ -112,6 +112,18 @@
         "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt",
         "pattern": "ENGINE_BOOT_BUDGET_MS"
       }
+    },
+    {
+      "id": "native-proot-paths",
+      "holder": "Android NativeProot resolver and app-owned launcher state",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/NativeProot.kt:prepare",
+      "sourceOfTruth": "ApplicationInfo.nativeLibraryDir from PackageManager; pinned native artifact metadata",
+      "syncPath": "EngineManager.shellEnv -> NativeProot.prepare -> atomic private state and stable $PREFIX/bin/dsh-debian; no host environment assumption",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/NativeProot.kt",
+        "pattern": "nativeLibraryDir"
+      }
     }
   ]
 }

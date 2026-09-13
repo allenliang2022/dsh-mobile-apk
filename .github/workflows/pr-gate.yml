@@ -13,6 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Native PRoot 源门禁与离线负控（不依赖快照，禁止 SKIP）
+        run: |
+          node scripts/check-native-proot.mjs
+          node scripts/tests/native-proot-gate.test.mjs
       - name: 冲突标记检查
         run: |
           if grep -rEn '^(<<<<<<< |>>>>>>> )' app/src --include='*.kt' --include='*.java' --include='*.xml' --include='*.html' --include='*.js' --include='*.yml' --include='*.yaml'; then
