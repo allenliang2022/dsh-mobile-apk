@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Guard/argument tests only; these do not claim Android acceptance."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -42,6 +43,32 @@ class EmulatorGuardTest(unittest.TestCase):
             self.assertNotIn("install",calls.read_text())
             self.assertNotIn("appops",calls.read_text())
             self.assertNotIn("run-as",calls.read_text())
+
+    def test_helper_only_never_claims_upgrade_or_native_guest_acceptance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); fake=root/"adb"; calls=root/"calls.txt"
+            apk=root/"test-fixture.apk"; apk.write_bytes(b"not-an-APK")
+            fake.write_text("#!"+sys.executable+"\nimport sys,os\n"
+                "with open(os.environ['GUARD_CALLS'],'a') as f:f.write(' '.join(sys.argv[1:])+'\\n')\n"
+                "values={'ro.kernel.qemu':'1','ro.hardware':'ranchu','ro.product.cpu.abi':'x86_64','ro.build.version.sdk':'26'}\n"
+                "if 'instrument' in sys.argv:print('OK (7 tests)')\n"
+                "else:print(values.get(sys.argv[-1],''))\n")
+            fake.chmod(0o755)
+            env=dict(os.environ,PATH=str(root)+os.pathsep+os.environ.get("PATH",""),GUARD_CALLS=str(calls))
+            result=subprocess.run([sys.executable,str(RUNNER),"--helper-only","--serial","emulator-5554",
+                "--new-apk",str(apk),"--test-apk",str(apk),"--out",str(root/"reports")],
+                env=env,capture_output=True,text=True,timeout=10)
+            self.assertEqual(0,result.returncode,result.stderr)
+            summary=json.loads((root/"reports/summary.json").read_text())
+            self.assertEqual("isolated-x86_64-helper-boundary",summary["scope"])
+            self.assertFalse(summary["upgradeRequested"])
+            self.assertFalse(summary["upgradeAcceptance"])
+            self.assertFalse(summary["nativeArm64Acceptance"])
+            text=calls.read_text()
+            self.assertNotIn("appops",text)
+            self.assertNotIn("am start",text)
+            self.assertNotIn("run-as",text)
+            self.assertNotIn("NativeProotHostAcceptanceTest",text)
 
 if __name__ == "__main__":
     unittest.main()

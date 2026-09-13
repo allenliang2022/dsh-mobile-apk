@@ -180,3 +180,60 @@ jobs:
           path: emulator-reports/
           if-no-files-found: warn
           retention-days: 14
+
+  emulator-api-boundary:
+    name: Android API ${{ matrix.api }} helper boundary
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [26, 28]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-proot-review-x86_64
+          path: emulator-input/new
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-proot-instrumentation-x86_64
+          path: emulator-input/tests
+      - name: Enable KVM for the throwaway runner emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Isolated API-boundary helper instrumentation
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: google_apis
+          arch: x86_64
+          ram-size: 2048M
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: >-
+            python scripts/native-proot-emulator-smoke.py
+            --helper-only
+            --serial emulator-5554
+            --new-apk emulator-input/new/app-debug.apk
+            --test-apk emulator-input/tests/app-debug-androidTest.apk
+            --out emulator-boundary-reports
+      - name: Upload bounded API-boundary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-proot-helper-api${{ matrix.api }}-x86_64
+          path: emulator-boundary-reports/
+          if-no-files-found: warn
+          retention-days: 14

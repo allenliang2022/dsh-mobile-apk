@@ -97,6 +97,18 @@ ARM64 Linux execution, guest package management or device-specific behaviour.
 implementation's commit, rollback and recovery using the production preservation
 list rather than reimplementing the copy policy.
 
+A separate helper-only emulator matrix covers API26 and API28. It installs the
+source APK and runs the PM/NIO/helper class without the host suite or snapshot
+startup. Its report explicitly keeps upgradeAcceptance and nativeArm64Acceptance
+false; passing a boundary helper test is not native guest or full host acceptance.
+
+Source revision ded8081 passed the complete API35 x86_64 upgrade flow and all
+8 real Android instrumented tests. Both source-APK build jobs also passed. These
+receipts cover only their reported emulator and source revision; later changes
+must be rerun. The coordinated-root sync allowlist and synthetic layout regressions
+are in scripts/native-proot-mirror-files.json and native-proot-mirror.test.mjs.
+They are not a receipt of a synchronized real coordinator checkout.
+
 ## Tests and release boundary
 
 ```sh

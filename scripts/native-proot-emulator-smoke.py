@@ -24,28 +24,36 @@ CLASSES = ",".join(PACKAGE + "." + n for n in
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--serial", required=True)
-    ap.add_argument("--old-apk", type=Path, required=True)
-    ap.add_argument("--old-sha256", required=True)
+    ap.add_argument("--old-apk", type=Path)
+    ap.add_argument("--old-sha256")
+    ap.add_argument("--helper-only", action="store_true",
+                    help="Run the API-boundary helper suite without a baseline upgrade or host snapshot startup")
     ap.add_argument("--new-apk", type=Path, required=True)
     ap.add_argument("--test-apk", type=Path, required=True)
-    ap.add_argument("--snapshot-sha256", required=True)
+    ap.add_argument("--snapshot-sha256")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--boot-timeout", type=int, default=900)
     args = ap.parse_args()
     if not re.fullmatch(r"emulator-\d+", args.serial):
         raise SystemExit("Refusing non-emulator ADB serial")
-    for value in (args.old_sha256, args.snapshot_sha256):
-        if not re.fullmatch(r"[a-f0-9]{64}", value):
-            raise SystemExit("Expected an explicit SHA-256 digest")
-    for p in (args.old_apk, args.new_apk, args.test_apk):
+    if not args.helper_only:
+        for value in (args.old_sha256, args.snapshot_sha256):
+            if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+                raise SystemExit("Upgrade mode requires explicit old/snapshot SHA-256 digests")
+        if args.old_apk is None:
+            raise SystemExit("Upgrade mode requires --old-apk")
+    required_apks = [args.new_apk, args.test_apk] + ([] if args.helper_only else [args.old_apk])
+    for p in required_apks:
         if not p.is_file():
             raise SystemExit("Required APK missing: " + str(p))
-    with args.old_apk.open("rb") as f:
-        if hashlib.file_digest(f, "sha256").hexdigest() != args.old_sha256:
-            raise SystemExit("Old release APK digest mismatch")
+    if not args.helper_only:
+        with args.old_apk.open("rb") as f:
+            if hashlib.file_digest(f, "sha256").hexdigest() != args.old_sha256:
+                raise SystemExit("Old release APK digest mismatch")
     args.out.mkdir(parents=True, exist_ok=True)
-    evidence = {"scope": "isolated-x86_64-emulator", "checks": [],
-                "nativeArm64Acceptance": False}
+    evidence = {"scope": "isolated-x86_64-helper-boundary" if args.helper_only else "isolated-x86_64-upgrade-emulator",
+                "checks": [], "nativeArm64Acceptance": False,
+                "upgradeRequested": not args.helper_only, "upgradeAcceptance": False}
 
     def adb(*parts, timeout=60, ok=True):
         # Disk-backed capture avoids an unbounded PIPE buffer; only 1 MiB is read.
@@ -73,8 +81,8 @@ def main():
     if qemu != "1" or hardware not in ("ranchu", "goldfish") or abi != "x86_64":
         raise SystemExit("Target is not an isolated x86_64 Android emulator")
     api = int(adb("shell", "getprop", "ro.build.version.sdk").stdout.strip())
-    if api < 30:
-        raise SystemExit("Host acceptance requires scoped storage, API30+")
+    if api < 26 or (api < 30 and not args.helper_only):
+        raise SystemExit("Helper boundary requires API26+; host upgrade suite requires API30+")
     evidence["api"] = api
     record("emulator-only execution guard")
     if "package:" in adb("shell", "pm", "path", PACKAGE, ok=False).stdout:
@@ -110,7 +118,24 @@ def main():
         # Never force-stop while a snapshot transaction is being extracted/swapped.
         raise RuntimeError("Runtime did not reach committed snapshot + HTTP readiness")
 
+    def instrument(classes):
+        result = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", classes,
+                     PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner", timeout=600, ok=False)
+        (args.out / "instrumentation.log").write_text(result.stdout)
+        summary = re.search(r"OK \(\d+ tests?\)", result.stdout)
+        if (result.returncode or not summary or
+                re.search(r"FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed", result.stdout)):
+            raise RuntimeError("Instrumentation failed; see bounded technical report")
+        evidence["instrumentationSummary"] = summary.group(0)
+
     try:
+        if args.helper_only:
+            adb("install", "-r", "-t", str(args.new_apk), timeout=180)
+            adb("install", "-r", "-t", str(args.test_apk), timeout=180)
+            instrument(PACKAGE + ".NativeProotAcceptanceTest")
+            record("real Android API-boundary PM/NIO/helper instrumentation only")
+            evidence["status"] = "passed"
+            return
         adb("install", "-r", "-t", str(args.old_apk), timeout=180)
         # Permissions only on the identity-checked throwaway emulator.
         adb("shell", "appops", "set", PACKAGE, "MANAGE_EXTERNAL_STORAGE", "allow")
@@ -119,6 +144,7 @@ def main():
         port = int(adb("forward", "tcp:0", "tcp:3080").stdout.strip())
         adb("shell", "am", "start", "-n", PACKAGE + "/.MainActivity")
         old_fingerprint = await_runtime()
+        evidence["baselineSnapshotSha256"] = old_fingerprint
         record("old release commits its snapshot and serves HTTP")
         payload = "native-proot-workspace-upgrade-fixture-v1"
         expected_hash = hashlib.sha256(payload.encode()).hexdigest()
@@ -133,6 +159,7 @@ def main():
         adb("install", "-r", "-t", str(args.new_apk), timeout=180)
         adb("shell", "am", "start", "-n", PACKAGE + "/.MainActivity")
         new_fingerprint = await_runtime(args.snapshot_sha256)
+        evidence["sourceSnapshotSha256"] = new_fingerprint
         if new_fingerprint == old_fingerprint:
             raise RuntimeError("No snapshot change: upgrade was not exercised")
         record("source APK upgrade commits a different snapshot and serves HTTP")
@@ -142,19 +169,13 @@ def main():
         if after != expected_hash or linked != expected_hash or target != ".native-upgrade-fixture":
             raise RuntimeError("Workspace rootfs fixture changed during upgrade")
         record("workspace content and symlink survive actual APK/snapshot upgrade")
+        evidence["upgradeAcceptance"] = True
         # Reduce broad storage grants before the emulator-only host suite. Scoped
         # storage is not a sandbox for public files previously owned by the app.
         adb("shell", "appops", "set", PACKAGE, "MANAGE_EXTERNAL_STORAGE", "deny")
         adb("shell", "pm", "revoke", PACKAGE, "android.permission.WRITE_EXTERNAL_STORAGE", ok=False)
         adb("install", "-r", "-t", str(args.test_apk), timeout=180)
-        result = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", CLASSES,
-                     PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner", timeout=600, ok=False)
-        (args.out / "instrumentation.log").write_text(result.stdout)
-        summary = re.search(r"OK \(\d+ tests?\)", result.stdout)
-        if (result.returncode or not summary or
-                re.search(r"FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed", result.stdout)):
-            raise RuntimeError("Instrumentation failed; see bounded technical report")
-        evidence["instrumentationSummary"] = summary.group(0)
+        instrument(CLASSES)
         record("real Android PM/filesystem/host launcher instrumentation")
         evidence["status"] = "passed"
     except Exception as exc:
