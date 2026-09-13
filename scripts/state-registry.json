@@ -102,6 +102,18 @@
       }
     },
     {
+      "id": "adb-runtime-patch-transaction",
+      "holder": "显式运行的 Python Installer（独立工具，不是 APK/引擎授权状态）",
+      "writePath": "runtime-patches/adb-local-listener/apply_patch.py:Installer._write_receipt",
+      "sourceOfTruth": "独立验证的构建清单、原始/兼容入口文件哈希、ELF ABI、类型、所有权与权限",
+      "syncPath": "prepared 收据和备份先于原子替换；后续 status/rollback 复核实际文件而非盲信收据；test_apply_patch.py 覆盖中断、重复应用与漂移拒绝",
+      "evidence": {
+        "kind": "grep",
+        "file": "runtime-patches/adb-local-listener/apply_patch.py",
+        "pattern": "def _write_receipt"
+      }
+    },
+    {
       "id": "notify-ready-gate",
       "holder": "壳侧（EngineStartFlow / OverlayService 通知应答流）",
       "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt",

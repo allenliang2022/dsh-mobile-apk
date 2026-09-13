@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+native/.host-tests.*/
+tests/android/.gradle/
+tests/android/build/
+tests/android/app/build/
+tests/android/app/src/main/assets/fixture.zip
