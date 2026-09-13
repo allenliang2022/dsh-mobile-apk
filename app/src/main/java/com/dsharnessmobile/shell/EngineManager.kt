@@ -1233,7 +1233,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // ADB 授权状态（0.13.0 F1.7）：dsh-android-bridge 插件据此失败关闭；门控=完全访问档位+开关+配对。
       "DSH_ADB_ALLOW" to (if (AdbState.allowSwitch(context)) "1" else "0"),
       "DSH_ADB_PAIRED" to (if (AdbState.paired(context)) "1" else "0"),
-      "DSH_ADB_WIRELESS" to (if (AdbState.paired(context)) "1" else "0"),
+      // A launch snapshot is not live proof; never substitute pairing for the system switch.
+      // The bridge consumes the monitor's timestamped preferences for live authorization.
+      "DSH_ADB_WIRELESS" to AdbState.env(context).getValue("DSH_ADB_WIRELESS"),
       // 门1「完全访问档位」= All Files Access（系统权限）——引擎侧判定与壳侧 AdbState.fullAccess() 同源
       // （审校 C6 语义分裂修复：此前引擎把「写面档位」误当门1，见 review 文档）；授予后重启引擎生效。
       "DSH_ADB_FULLACCESS" to (if (AdbState.fullAccess()) "1" else "0"),

@@ -40,7 +40,11 @@ function connectedPrefsPath() {
     '  <boolean name="allowSwitch" value="true" />',
     '  <boolean name="paired" value="true" />',
     '  <boolean name="connected" value="true" />',
+    '  <boolean name="endpointReachable" value="true" />',
     '  <boolean name="fullAccess" value="true" />',
+    '  <boolean name="wirelessKnown" value="true" />',
+    '  <boolean name="wirelessOn" value="true" />',
+    `  <long name="wirelessObservedAt" value="${Date.now()}" />`,
     '</map>',
   ].join('\n'))
   return file

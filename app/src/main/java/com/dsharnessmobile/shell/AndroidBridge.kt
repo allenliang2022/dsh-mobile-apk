@@ -59,6 +59,10 @@ class AndroidBridge(
    *  与壳 AdbState.discoverPorts 同形状（桥默认值同为完整结构，不再返回 "[]" 造成两端不一致）。
    *  0.14：Shizuku 探活重设计与豁免升级。 */
   private val onDiscoverAdbPorts: () -> String = { """{"pair":null,"connect":null,"candidates":[]}""" },
+  /** Async v2 entrypoints. A ticket is not a successful pairing receipt. */
+  private val onStartAdbDiscovery: () -> String = { """{"ok":false,"message":"bridge not wired"}""" },
+  private val onStartAdbPair: (String, Int, Int, String) -> String = { _, _, _, _ -> """{"ok":false,"message":"bridge not wired"}""" },
+  private val onGetAdbOperation: (String) -> String = { _ -> """{"ok":false,"message":"bridge not wired"}""" },
   /** 0.13.2 W7：悬浮球开关态（持久化，OverlayController）。 */
   private val onGetOverlayEnabled: () -> Boolean = { false },
   /** 0.13.2 W7：悬浮球开关（未授 overlay 权限时由控制器发起系统授权引导）。返回是否已启动。 */
@@ -242,10 +246,22 @@ class AndroidBridge(
     onRevokeAdbPair()
   }
 
-  /** 自动发现无线调试端口（issue #80）：返回配对端口候选 JSONArray（顺序端序）。
-   *  耗时为原生 TCP 盲扫（毫秒/端口）；无线调试未开时返回 []。 */
+  /** Legacy synchronous discovery. New clients use the nonblocking ticket API. */
   @JavascriptInterface
   fun discoverAdbPorts(): String = onDiscoverAdbPorts()
+
+  /** Force fresh, typed service discovery without blocking WebView's JS roundtrip. */
+  @JavascriptInterface
+  fun startAdbDiscovery(): String = onStartAdbDiscovery()
+
+  /** The host is validated as a local IP by AdbState, never an arbitrary LAN target. */
+  @JavascriptInterface
+  fun startAdbPair(code: String, pairPort: Int, connectPort: Int, host: String): String =
+    onStartAdbPair(code, pairPort, connectPort, host)
+
+  /** Poll only the operation represented by this opaque ticket. No arguments are returned. */
+  @JavascriptInterface
+  fun getAdbOperation(requestId: String): String = onGetAdbOperation(requestId)
 
   /** 悬浮球开关态（持久化；开发者选项 → 悬浮球）。 */
   @JavascriptInterface

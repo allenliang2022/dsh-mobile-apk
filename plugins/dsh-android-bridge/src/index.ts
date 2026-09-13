@@ -14,6 +14,9 @@
  */
 import { readFileSync, appendFileSync, mkdirSync, statSync, writeFileSync, renameSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { isIP } from 'node:net'
+import { networkInterfaces } from 'node:os'
+export { mergeDiscovery, runAdbOperation, pairFailText, AdbOperationError } from './client/adb-model.js'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { decideControl, type ControlDecision, type ControlOp } from './control-policy.js'
@@ -77,16 +80,20 @@ export interface AdbStatus {
   tier: PrivilegeTier
   /** 完全访问档位（All Files Access，系统权限；门1 前置） */
   fullAccess: boolean
-  /** 写面档位（shell-termux sandboxMode；第二独立前置，非 danger 不构成开放条件） */
+  /** 部署默认档位，仅显示；实际会话权限在每次调用时单独 resolve。 */
   writeMode?: string
-  /** 系统无线调试已开启（第一道人门，应用不可程序化开启） */
+  /** 探测未知时不把 paired 当作实时事实；布尔仅供保守门控。 */
   wirelessDebugOn?: boolean
+  wirelessDebugState: 'on' | 'off' | 'unknown'
+  wirelessKnown: boolean
+  wirelessObservedAt?: number
   /** 应用内「允许访问」开关（第二道人门，默认关闭） */
   allowSwitchOn?: boolean
   /** 已配对（第三道人门；0.14 起 = 真实 adb pair 握手成功） */
   paired?: boolean
   /** 通道连接状态（配对后 adb connect 探活缓存；0.14 真实通道） */
   connected?: boolean
+  endpointReachable?: boolean
   /** 到期/错误信息（未授权时为引导文案） */
   message?: string
 }
@@ -129,8 +136,11 @@ export interface ShellAdbPrefs {
   /** 0.14 真实通道：配对端口/连接端口（系统「无线调试」弹窗抄录；连接端口供引擎侧 adb connect/shell）。 */
   pairPort?: string
   connectPort?: string
+  /** Native validates local interface membership before persisting; engine checks it again. */
+  connectHost?: string
   /** 配对后 connect 探活缓存（壳侧 AdbState 维护；引擎只读）。 */
   connected?: boolean
+  endpointReachable?: boolean
   /** 0.13.5 W4：无障碍服务已连接（壳侧 DeviceControlService 维护；控制通道开关事实）。 */
   a11yEnabled?: boolean
   /** 0.13.5 W4：无障碍控制队列的共享令牌（壳侧每次启动生成；引擎侧比对）。 */
@@ -143,9 +153,11 @@ export interface ShellAdbPrefs {
    * ST-12：无线调试的**活体键**（壳 AdbState.syncWirelessLive 写入，TTL 2s < 页面轮询 3s）。
    * 与 paired 的区别：paired 是「曾经配对成功」的历史事实（授权持久化），wirelessOn 是
    * 「系统无线调试此刻开着」的实时开关——两者会分叉（用户配对后关掉无线调试）。
-   * undefined = prefs 无该键（旧壳）→ 回落 paired（旧语义，不假装知道实时值）。
+   * 缺少已知位或时间戳的旧壳只能表示 unknown，不得从 paired 推导开关。
    */
   wirelessOn?: boolean
+  wirelessKnown?: boolean
+  wirelessObservedAt?: number
 }
 
 /** 持久文件路径：环境变量显式指定（测试/桌面模拟）优先；安卓壳域默认；其余返回 null。 */
@@ -162,8 +174,10 @@ export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
   const mAllow = /<boolean\s+name="allowSwitch"\s+value="(true|false)"\s*\/?>/.exec(xml)
   const mPair = /<boolean\s+name="paired"\s+value="(true|false)"\s*\/?>/.exec(xml)
   const mConnected = /<boolean\s+name="connected"\s+value="(true|false)"\s*\/?>/.exec(xml)
+  const mReachable = /<boolean\s+name="endpointReachable"\s+value="(true|false)"\s*\/?>/.exec(xml)
   const mPairPort = /<string\s+name="pairPort">([^<]*)<\/string>/.exec(xml)
   const mConnectPort = /<string\s+name="connectPort">([^<]*)<\/string>/.exec(xml)
+  const mConnectHost = /<string\s+name="connectHost">([^<]*)<\/string>/.exec(xml)
   // 0.13.5 W4：无障碍控制通道事实（服务连接状态 + 队列共享令牌）
   const mA11y = /<boolean\s+name="a11yEnabled"\s+value="(true|false)"\s*\/?>/.exec(xml)
   const mToken = /<string\s+name="controlToken">([^<]*)<\/string>/.exec(xml)
@@ -172,20 +186,25 @@ export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
   const mFullAccess = /<boolean\s+name="fullAccess"\s+value="(true|false)"\s*\/?>/.exec(xml)
   // ST-12：无线调试活体键（写端 = 壳侧 AdbState.syncWirelessLive；TTL 2s）。
   const mWirelessOn = /<boolean\s+name="wirelessOn"\s+value="(true|false)"\s*\/?>/.exec(xml)
-  // 只要任一受管键在场就解析——无障碍通道独立于 ADB 三道人门，
-  // 未开启 ADB 时 prefs 里可能只有 a11yEnabled/controlToken（0.13.5 实测踩坑）。
-  if (!mAllow && !mPair && !mA11y && !mToken && !mFullAccess) return null
+  const mWirelessKnown = /<boolean\s+name="wirelessKnown"\s+value="(true|false)"\s*\/?>/.exec(xml)
+  const mWirelessAt = /<long\s+name="wirelessObservedAt"\s+value="(\d+)"\s*\/?>/.exec(xml)
+  // Include independently updated wireless keys, even before any pairing has happened.
+  if (![mAllow, mPair, mA11y, mToken, mFullAccess, mWirelessOn, mWirelessKnown, mWirelessAt, mConnectHost, mConnectPort, mConnected, mReachable, mHeartbeat, mPairPort].some(Boolean)) return null
   return {
     allowSwitch: mAllow ? mAllow[1] === 'true' : false,
     paired: mPair ? mPair[1] === 'true' : false,
     connected: mConnected ? mConnected[1] === 'true' : false,
+    endpointReachable: mReachable ? mReachable[1] === 'true' : undefined,
     pairPort: mPairPort?.[1] || undefined,
     connectPort: mConnectPort?.[1] || undefined,
+    connectHost: mConnectHost?.[1],
     a11yEnabled: mA11y ? mA11y[1] === 'true' : false,
     controlToken: mToken?.[1] || undefined,
     controlHeartbeat: mHeartbeat ? Number(mHeartbeat[1]) : undefined,
     fullAccess: mFullAccess ? mFullAccess[1] === 'true' : undefined,
     wirelessOn: mWirelessOn ? mWirelessOn[1] === 'true' : undefined,
+    wirelessKnown: mWirelessKnown ? mWirelessKnown[1] === 'true' : undefined,
+    wirelessObservedAt: mWirelessAt ? Number(mWirelessAt[1]) : undefined,
   }
 }
 
@@ -214,11 +233,68 @@ export function shellControlToken(): string | undefined {
 /**
  * 授权事实解析（2026-08-23 审校 C6/C7——引擎级 × 会话级两维模型）：
  * - **引擎级（用户是否授权）**：门1 All Files Access（DSH_ADB_FULLACCESS）+ 门2 允许开关
- *   + 门3 配对（live 壳侧 SharedPreferences）+ 无线调试（=paired 间接证明）——设备全局事实；
+ *   + 门3 配对（live 壳侧 SharedPreferences）+ 无线调试（新鲜原生观测）——设备全局事实；
  * - **会话级（AI 能否获取）**：dsh-sandbox-policy 的当前会话档位（resolve({session})，实时）
  *   ——通道工具在每个 execute 按 `exec.agent.session` resolve；≠'danger-full-access' 即拒绝；
  * - 写面档位默认（sandboxPolicy.defaultMode）只作全局视图/引导显示；自动审批不参与判定。
  */
+export const WIRELESS_FRESH_MS = 15_000
+
+/** Missing/legacy/failed/stale observations are unknown, never historical pairing evidence. */
+export function wirelessState(live: Pick<ShellAdbPrefs, 'wirelessKnown' | 'wirelessOn' | 'wirelessObservedAt'> | undefined, now = Date.now()): 'on' | 'off' | 'unknown' {
+  const at = live?.wirelessObservedAt
+  if (live?.wirelessKnown !== true || typeof live.wirelessOn !== 'boolean' ||
+      typeof at !== 'number' || !Number.isFinite(at) || at <= 0 || now < at || now - at >= WIRELESS_FRESH_MS) return 'unknown'
+  return live.wirelessOn ? 'on' : 'off'
+}
+
+/** Numeric-only canonicalization, no DNS. Scoped link-local literals require a matching live interface. */
+function numericHost(input: string): { address: string; scope?: string; family: number; linkLocal: boolean; loopback: boolean } | undefined {
+  if (!input || input.length > 128 || input !== input.trim()) return undefined
+  const unbracketed = input.startsWith('[') && input.endsWith(']') ? input.slice(1, -1) : input
+  const [body, scope, ...extra] = unbracketed.split('%')
+  if (extra.length || (scope !== undefined && !/^[a-zA-Z0-9_.-]{1,64}$/.test(scope))) return undefined
+  let family = isIP(body)
+  if (!family || (family === 4 && scope !== undefined)) return undefined
+  let address = body
+  if (family === 6) {
+    try { address = new URL(`http://[${body}]/`).hostname.slice(1, -1) } catch { return undefined }
+    const mapped = /^::ffff:([0-9a-f]+):([0-9a-f]+)$/.exec(address)
+    if (mapped) {
+      const hi = parseInt(mapped[1], 16), lo = parseInt(mapped[2], 16)
+      address = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`
+      family = 4
+    }
+  }
+  const first = family === 4 ? Number(address.split('.')[0]) : parseInt(address.split(':')[0] || '0', 16)
+  if ((family === 4 && (address === '0.0.0.0' || first >= 224)) || (family === 6 && (address === '::' || address.startsWith('ff')))) return undefined
+  return { address, scope, family, linkLocal: family === 6 && (first & 0xffc0) === 0xfe80, loopback: family === 4 ? first === 127 : address === '::1' }
+}
+
+/** Recheck local-device scope at every use; interface-read failure permits loopback only. */
+export function localAdbEndpoint(prefs: Pick<ShellAdbPrefs, 'connectHost' | 'connectPort'> | undefined, addresses?: readonly string[]): string | undefined {
+  const host = numericHost(prefs?.connectHost ?? '127.0.0.1') // legacy endpoint was always loopback
+  const port = prefs?.connectPort
+  if (!port || !/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535 || !host) return undefined
+  let local = addresses
+  if (!local) {
+    try {
+      local = Object.entries(networkInterfaces()).flatMap(([name, values]) => (values ?? []).flatMap((a) => {
+        const scopeid = 'scopeid' in a ? a.scopeid : undefined
+        return typeof scopeid === 'number' && scopeid > 0
+          ? [a.address, `${a.address.split('%')[0]}%${scopeid}`, `${a.address.split('%')[0]}%${name}`]
+          : [a.address]
+      }))
+    } catch { local = [] }
+  }
+  if (!host.loopback && !local.some((s) => {
+    const candidate = numericHost(s)
+    return candidate?.address === host.address && (!host.linkLocal || (!!host.scope && candidate.scope === host.scope))
+  })) return undefined
+  const address = host.address + (host.linkLocal ? `%${host.scope}` : '')
+  return `${host.family === 6 ? `[${address}]` : address}:${Number(port)}`
+}
+
 function currentStatus(env: NodeJS.ProcessEnv, defaultWriteMode?: string): AdbStatus {
   const writeMode = defaultWriteMode ?? env.DSH_WRITE_MODE ?? 'workspace-write'
   // live 优先：壳侧 SharedPreferences（引擎与壳同 UID 直读，只读）；无文件 → env 启动快照。
@@ -228,10 +304,12 @@ function currentStatus(env: NodeJS.ProcessEnv, defaultWriteMode?: string): AdbSt
   const fullAccess = live ? (live.fullAccess ?? (env.DSH_ADB_FULLACCESS === '1')) : (env.DSH_ADB_FULLACCESS === '1')
   const allowSwitchOn = live ? live.allowSwitch : env.DSH_ADB_ALLOW === '1'
   const paired = live ? live.paired : env.DSH_ADB_PAIRED === '1'
-  // ST-12：无线调试以活体键为准（wirelessOn 在场即用，哪怕它是 false——那是「配对后关掉
-  // 无线调试」的实时事实）；旧壳无该键 → 回落 paired（旧的间接证明语义）。
-  const wirelessDebugOn = live ? (live.wirelessOn ?? live.paired) : env.DSH_ADB_WIRELESS === '1'
-  const connected = live ? live.connected === true : false
+  // Legacy DSH_ADB_WIRELESS was also derived from paired; it is not observation evidence.
+  const wirelessDebugState = wirelessState(live)
+  const wirelessKnown = wirelessDebugState !== 'unknown'
+  const wirelessDebugOn = wirelessDebugState === 'on'
+  const endpointReachable = wirelessKnown && live?.endpointReachable === true
+  const connected = paired && wirelessDebugOn && endpointReachable && live?.connected === true
   const authorized = fullAccess && allowSwitchOn && paired && wirelessDebugOn
   const tier: PrivilegeTier = authorized && writeMode === 'danger-full-access' ? 'T1' : 'T0'
   return {
@@ -239,9 +317,13 @@ function currentStatus(env: NodeJS.ProcessEnv, defaultWriteMode?: string): AdbSt
     fullAccess,
     writeMode,
     wirelessDebugOn,
+    wirelessDebugState,
+    wirelessKnown,
+    ...(wirelessKnown ? { wirelessObservedAt: live!.wirelessObservedAt } : {}),
     allowSwitchOn,
     paired,
     connected,
+    endpointReachable,
     message: authorized
       ? writeMode === 'danger-full-access'
         ? connected === false
@@ -250,7 +332,13 @@ function currentStatus(env: NodeJS.ProcessEnv, defaultWriteMode?: string): AdbSt
         : `已授权（引擎级）——当前部署档位 ${writeMode}，会话内档位实时判定（/permission danger-full-access 可即时开放）`
       : !fullAccess
         ? '未授权：需先授予系统「所有文件访问」（完全访问档位，回前台即生效）——自动审批模式不构成开放条件'
-        : '未授权：请在「开发者选项 → 无线调试」开启并输入配对码与弹窗端口（授权状态在重启后需重新配对）',
+        : !allowSwitchOn
+          ? '未授权：请开启应用内「允许访问」开关'
+          : wirelessDebugState === 'unknown'
+            ? '无线调试状态未知（缺少新鲜原生观测，旧壳需升级）；请刷新或扫描端口，不等同于系统已关闭'
+            : !paired
+              ? '尚未配对：请从当前配对码窗口填写配对码/配对端口，并从无线调试主页填写连接端口'
+              : '无线调试当前未开启；请核对系统开关与本机连接端口',
     }
   }
 
@@ -376,6 +464,8 @@ function collectText(x: unknown): string {
 export class AndroidPrivilegeService {
   /** 最近一次连接校验缓存的设备型号（F4 多设备消歧；空 = 未校验/校验失败）。 */
   private liveModel = ''
+  private liveModelEndpoint = ''
+  private liveModelAt = 0
 
   constructor(
     private readonly ctx: Context,
@@ -536,33 +626,31 @@ export class AndroidPrivilegeService {
     return this.controlQueue.enqueue(op, args, timeoutMs)
   }
 
-  /**
-   * 现场解析可用连接端口：配置端口优先（壳侧 AdbState 记录），失效即回退 5555
-   * （vivo 等无线调试常驻端口；NSD 记录值会随无线调试重启轮换——2026-08-27 实锤 37575 失联）。
-   * 端口为 loopback 信息不入审计。@returns 可用端口与 connect 输出；全失败返回 undefined。
-   */
-  private async resolveLivePort(): Promise<{ port: string; output: string; model?: string } | { port: undefined; output: string; model?: undefined }> {
-    const candidates = [...new Set([this.connectPort(), '5555'].filter((p): p is string => !!p))]
-    let last = ''
-    for (const port of candidates) {
-      const c = await this.runLine(`adb connect 127.0.0.1:${port}`)
-      if (!c.ok) { last = c.stdout; continue }
-      last = c.stdout
-      if (/connected to|already connected/i.test(c.stdout)) {
-        // F4 多设备消歧（2026-09-05 真机实测）：connect 成功 ≠ 绑定预期设备——
-        // emulator-5554 的 adb 端口恰为 127.0.0.1:5555，5555 兜底可能绑错对象。
-        // 回读型号做在场校验并缓存（android_privilege_status / device_info 展示）。
-        const id = await this.runLine(`adb -s 127.0.0.1:${port} shell getprop ro.product.model`)
-        const model = id.ok ? id.stdout.trim() : ''
-        if (model) this.liveModel = model
-        return { port, output: c.stdout, model: this.liveModel || undefined }
-      }
+  /** Only the native-persisted, locally validated endpoint is eligible. No guessed 5555 fallback. */
+  private async resolveLivePort(): Promise<{ endpoint?: string; output: string }> {
+    this.liveModel = ''
+    const endpoint = localAdbEndpoint(readShellAdbState())
+    if (!endpoint) return { output: '缺少有效的本机连接地址/端口；请核对无线调试主页并重新配对' }
+    const c = await this.runLine(`adb connect '${endpoint}'`)
+    const lines = c.stdout.split(/\r?\n/).map((line) => line.trim())
+    if (!c.ok || !lines.some((line) => line === `connected to ${endpoint}` || line === `already connected to ${endpoint}`)) {
+      return { output: c.stdout || '连接未确认' }
     }
-    return { port: undefined, output: last }
+    if (!engineLevelReady(this.status()) || localAdbEndpoint(readShellAdbState()) !== endpoint) {
+      return { output: '本机地址或授权状态在连接期间发生变化；请刷新后重试' }
+    }
+    const id = await this.runLine(`adb -s '${endpoint}' shell getprop ro.product.model`)
+    if (!id.ok || !id.stdout.trim()) return { output: '连接后的设备探活未通过；未执行请求的设备命令' }
+    this.liveModel = id.stdout.trim().slice(0, 256) // informational, not a device-identity attestation
+    this.liveModelEndpoint = endpoint
+    this.liveModelAt = Date.now()
+    return { endpoint, output: c.stdout }
   }
 
   /** 最近一次连接校验缓存的设备型号（F4；空 = 未校验/校验失败）。 */
   boundModel(): string {
+    if (!engineLevelReady(this.status()) || Date.now() - this.liveModelAt >= WIRELESS_FRESH_MS ||
+        this.liveModelEndpoint !== localAdbEndpoint(readShellAdbState())) this.liveModel = ''
     return this.liveModel
   }
 
@@ -570,12 +658,16 @@ export class AndroidPrivilegeService {
   private async runLine(line: string): Promise<{ ok: boolean; stdout: string }> {
     if (!this.shellFace) return { ok: false, stdout: 'Termux 执行器（dsh-shell-termux）未装配' }
     try {
-      const input = { command: line, cwd: '/', env: {} }
+      const input = { command: line, workdir: '/', env: {} }
       const spec = this.shellFace.resolve ? this.shellFace.resolve(input) : input
       const r = await this.shellFace.run(spec)
+      const sandbox = r.sandbox as { denied?: boolean; runnerFailed?: boolean } | undefined
+      const ok = r.exitCode === 0 && r.timedOut !== true && r.aborted !== true &&
+        (r.signal === null || r.signal === undefined) && sandbox?.denied !== true && sandbox?.runnerFailed !== true
+      const text = collectText(r.stdout) + collectText(r.stderr)
       return {
-        ok: true,
-        stdout: collectText((r as Record<string, unknown>).stdout) + collectText((r as Record<string, unknown>).stderr),
+        ok,
+        stdout: text || (ok ? '' : `执行未成功（exit=${String(r.exitCode ?? 'unknown')}, timeout=${String(r.timedOut === true)}）`),
       }
     } catch (e) {
       return { ok: false, stdout: '执行失败：' + String((e as Error).message) }
@@ -592,10 +684,14 @@ export class AndroidPrivilegeService {
       return { ok: false, stdout: '', guidance: this.status().message ?? '未授权' }
     }
     const live = await this.resolveLivePort()
-    if (live.port === undefined) {
-      return { ok: false, stdout: live.output.slice(0, 2048), guidance: 'ADB 连接不可用（配置端口与 5555 均失联）：确认「无线调试」仍开启，必要时重新配对' }
+    if (live.endpoint === undefined) {
+      return { ok: false, stdout: live.output.slice(0, 2048), guidance: 'ADB 本机连接未确认：请核对无线调试主页的连接端口，必要时重新配对' }
     }
-    const port = live.port
+    const endpoint = live.endpoint
+    if (!engineLevelReady(this.status()) || localAdbEndpoint(readShellAdbState()) !== endpoint) {
+      this.liveModel = ''
+      return { ok: false, stdout: '', guidance: '本机地址或授权状态在探活期间发生变化；未执行请求的命令' }
+    }
     // F3 远端 PATH 污染修复（2026-09-05 真机实锤）：客户端环境把 Termux usr/bin 传进远端
     // shell → /system/bin/input 等脚本解析 cmd 落到 app 私有目录（Permission denied，且
     // shell uid 本就无权读 app 私有目录）。远端统一 export 纯系统 PATH；整段命令单引号
@@ -603,7 +699,7 @@ export class AndroidPrivilegeService {
     // 防误伤注记同源）。
     const remote = 'export PATH=/system/bin:/system/xbin; ' + command
     const quoted = "'" + remote.replace(/'/g, `'\\''`) + "'"
-    const out = await this.runLine(`adb -s 127.0.0.1:${port} shell ${quoted}`)
+    const out = await this.runLine(`adb -s '${endpoint}' shell ${quoted}`)
     if (!out.ok) return { ok: false, stdout: out.stdout }
     if (/(^|\n)error:|no devices\/emulators|offline/.test(out.stdout)) {
       return { ok: false, stdout: out.stdout.slice(0, 4096), guidance: 'ADB 连接不可用：确认「无线调试」仍开启，必要时重新配对' }
@@ -621,13 +717,17 @@ export class AndroidPrivilegeService {
       return { ok: false, stdout: '', guidance: this.status().message ?? '未授权' }
     }
     const live = await this.resolveLivePort()
-    if (live.port === undefined) {
-      return { ok: false, stdout: live.output.slice(0, 2048), guidance: 'ADB 连接不可用（配置端口与 5555 均失联）：确认「无线调试」仍开启，必要时重新配对' }
+    if (live.endpoint === undefined) {
+      return { ok: false, stdout: live.output.slice(0, 2048), guidance: 'ADB 本机连接未确认：请核对无线调试主页的连接端口，必要时重新配对' }
     }
-    const port = live.port
+    const endpoint = live.endpoint
+    if (!engineLevelReady(this.status()) || localAdbEndpoint(readShellAdbState()) !== endpoint) {
+      this.liveModel = ''
+      return { ok: false, stdout: '', guidance: '本机地址或授权状态在探活期间发生变化；未执行请求的命令' }
+    }
     if (!/^adb\s/.test(line)) return { ok: false, stdout: '', guidance: 'execAdbLine 只能执行以 adb 开头的行' }
     // 仅注入命令位置（行首 / && / ; 之后）的 adb，避免误伤引号内文本（如 adb shell "echo adb hi"）。
-    const line2 = line.replace(/(^|&&\s*|;\s*)adb\s/g, `$1adb -s 127.0.0.1:${port} `)
+    const line2 = line.replace(/(^|&&\s*|;\s*)adb\s/g, `$1adb -s '${endpoint}' `)
     const out = await this.runLine(`${line2}`)
     if (!out.ok) return { ok: false, stdout: out.stdout }
     return { ok: true, stdout: out.stdout.slice(0, 128 * 1024) }
@@ -648,9 +748,13 @@ export const PRIVILEGE_STATUS_OUTPUT_SCHEMA: Record<string, unknown> = {
     tier: { type: 'string', required: true },
     fullAccess: { type: 'boolean', required: true },
     wirelessDebugOn: { type: 'boolean' },
+    wirelessDebugState: { type: 'string' },
+    wirelessKnown: { type: 'boolean' },
+    wirelessObservedAt: { type: 'number' },
     allowSwitchOn: { type: 'boolean' },
     paired: { type: 'boolean' },
     connected: { type: 'boolean' },
+    endpointReachable: { type: 'boolean' },
     authorized: { type: 'boolean' },
     writeMode: { type: 'string' },
     deviceModel: { type: 'string', description: '当前绑定设备型号（连接校验缓存；空=未知）' },

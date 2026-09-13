@@ -1,7 +1,7 @@
 {
   "name": "@dsh-android/dsh-android-bridge",
   "description": "Android privilege bridge: ADB authorization state machine, fail-closed execution, audit — the only controlled privilege-extension channel (PRD F1.7)",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -28,9 +28,9 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "build": "tsc -p . && tsc -p tsconfig.client.json --noEmit && node build-client.mjs",
-    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "npm run build && node --test test/control.test.mjs test/protocol-negotiation.test.mjs test/notify-projection.test.mjs test/privilege-status.test.mjs test/wireless-live.test.mjs test/a11y-freshness.test.mjs"
+    "build": "node node_modules/typescript/bin/tsc -p . && node node_modules/typescript/bin/tsc -p tsconfig.client.json --noEmit && node build-client.mjs",
+    "typecheck": "node node_modules/typescript/bin/tsc -p . --noEmit && node node_modules/typescript/bin/tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

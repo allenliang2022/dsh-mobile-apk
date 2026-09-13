@@ -53,6 +53,12 @@ export interface AndroidShellBridge {
   /** 0.13.2 W7: floating-ball toggle; returns whether the overlay actually started
    *  (false = SYSTEM_ALERT_WINDOW not granted — the shell opens the settings page). */
   setOverlayEnabled?: (enable: boolean) => boolean
+  /** Async ADB v2: returns an opaque receipt, not an authorization/success assertion. */
+  startAdbDiscovery?: () => string
+  /** Native code validates host as a local IP; code and arguments never appear in receipts. */
+  startAdbPair?: (code: string, pairPort: number, connectPort: number, host: string) => string
+  /** Poll {ok,state,kind,result?}; expired receipts do not imply cancellation. */
+  getAdbOperation?: (requestId: string) => string
 }
 
 declare global {

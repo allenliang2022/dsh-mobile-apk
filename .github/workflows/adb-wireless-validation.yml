@@ -1,0 +1,159 @@
+# Development-only validation. Never publishes a Release or installs on a physical device.
+name: ADB wireless validation
+
+on:
+  push:
+    branches: [fix/wireless-debug-discovery]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Wireless bridge and source APK (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            snapshot: arm64
+            sha: ed24dfcc004725dee4c41e6b9d139fa10e97455af270187794f838327caec28f
+          - abi: x86_64
+            snapshot: x86_64
+            sha: 8409612269a56e7529da6527e153744c161a235be6679b2d3d5219d17f63be79
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build and test the exact bridge injected into the APK
+        working-directory: plugins/dsh-android-bridge
+        run: |
+          npm ci --include=dev
+          npm run typecheck
+          npm test
+      - name: Native contracts and narrow snapshot-injection regressions
+        run: |
+          set -euo pipefail
+          node scripts/check-bridge-symmetry.mjs
+          node scripts/check-kotlin-comments.mjs
+          node scripts/check-bounded-io.mjs
+          python scripts/tests/adb-bridge-snapshot.test.py
+      - name: Pin factory input and inject only the tested bridge package
+        env:
+          SNAPSHOT_ABI: ${{ matrix.snapshot }}
+          EXPECTED_SHA: ${{ matrix.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-input app/src/main/assets
+          curl --fail --location --retry 3 --max-time 600 \
+            "https://github.com/kelai141/dsh-mobile-apk/releases/download/v0.14.0-preview/snapshot-${SNAPSHOT_ABI}.tar.xz" \
+            --output build-input/factory.tar.xz
+          python scripts/adb-bridge-snapshot.py build-input/factory.tar.xz \
+            app/src/main/assets/snapshot.tar.xz plugins/dsh-android-bridge \
+            --expected-sha256 "$EXPECTED_SHA" > app/src/main/assets/snapshot.sha256
+      - name: JVM regressions and single-ABI application/instrumentation builds
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest \
+            --no-daemon --stacktrace -PtargetAbi="${{ matrix.abi }}" \
+            -PversionNameSuffix=-adb-wireless-review
+      - name: Verify packaged snapshot, ABI and native provenance
+        run: |
+          set -euo pipefail
+          node scripts/check-native-proot.mjs --abi "${{ matrix.abi }}" --apk app/build/outputs/apk/debug/app-debug.apk
+          python - <<'PY'
+          import hashlib, pathlib, zipfile
+          apk = pathlib.Path('app/build/outputs/apk/debug/app-debug.apk')
+          expected = pathlib.Path('app/src/main/assets/snapshot.sha256').read_text().strip()
+          with zipfile.ZipFile(apk) as archive:
+              data = archive.read('assets/snapshot.tar.xz')
+              assert hashlib.sha256(data).hexdigest() == expected
+              assert archive.read('assets/snapshot.sha256').decode().strip() == expected
+          print('Packaged snapshot matches the verified bridge build:', expected)
+          PY
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adb-wireless-junit-${{ matrix.abi }}
+          path: app/build/test-results/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload validated development APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: adb-wireless-apk-${{ matrix.abi }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload instrumentation APK
+        if: matrix.abi == 'x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: adb-wireless-instrumentation-x86_64
+          path: app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  emulator:
+    name: Isolated Android 35 WebView and NSD contract
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: adb-wireless-apk-x86_64
+          path: input/app
+      - uses: actions/download-artifact@v4
+        with:
+          name: adb-wireless-instrumentation-x86_64
+          path: input/test
+      - name: Enable disposable runner KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Exercise actual WebView bridge and NSD API, not real pairing
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            mkdir -p reports
+            adb -s emulator-5554 install -t input/app/app-debug.apk
+            adb -s emulator-5554 install -t input/test/app-debug-androidTest.apk
+            adb -s emulator-5554 shell am instrument -w -r -e class com.dsharnessmobile.shell.AdbBridgeInstrumentedTest com.dsharnessmobile.shell.test/androidx.test.runner.AndroidJUnitRunner > reports/instrumentation.txt
+            python -c "from pathlib import Path; s=Path('reports/instrumentation.txt').read_text(); print(s); assert 'OK (2 tests)' in s and 'FAILURES!!!' not in s and 'INSTRUMENTATION_FAILED' not in s"
+      - name: Upload bounded instrumentation output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adb-wireless-emulator-api35
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14

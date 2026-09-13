@@ -94,30 +94,32 @@ class W3ShellContractTest {
     assertTrue("新下载分支也必须走同一判定（旧实现只判 HTTP 200）", afterDownload.contains("artifactVerdict()"))
   }
 
-  // ── ST-12：wirelessDebugOn / connected 走轻量真源探测，且 TTL < 页面轮询 ──
+  // ── ST-12：后台真源生产者 + 非阻塞快照；未知不可谎报关闭 ──
 
   @Test
-  fun stateJsonProbesWirelessDebugLiveInsteadOfEchoingThePreference() {
+  fun stateJsonUsesBackgroundObservationInsteadOfBlockingOrEchoingPairing() {
     val body = memberBody(codeOnly(source("AdbState.kt")), "fun stateJson(context: Context): String")
-    assertTrue("必须活体探测", body.contains("wirelessDebugLive(context)"))
-    assertTrue("wirelessDebugOn 用活体值", body.contains(".put(\"wirelessDebugOn\", wirelessOn)"))
-    assertFalse(
-      "旧实现（wirelessDebugOn = pair 偏好回读）必须消失——那正是「关掉无线调试后仍显示已授权」",
-      body.contains(".put(\"wirelessDebugOn\", pair)"),
-    )
-    assertTrue("connected 必须叠加活体可达", body.contains("connected(context) && wirelessOn"))
+    assertTrue("读取后台真源快照", body.contains("wirelessSnapshot()"))
+    assertTrue("按需安排后台刷新", body.contains("requestStatusRefresh(context)"))
+    assertFalse("bridge 快读不能等待 socket", body.contains("tcpProbe("))
+    assertTrue("wirelessDebugOn 用已知的活体值", body.contains("observation.known && observation.on"))
+    assertTrue("明确暴露未知", body.contains(".put(\"wirelessKnown\", observation.known)"))
+    assertFalse("配对偏好不是系统开关", body.contains(".put(\"wirelessDebugOn\", pair)"))
+    assertTrue("连接必须当前端点可达", body.contains("connected(context) && observation.endpointReachable && wirelessOn"))
     assertTrue("授权判定必须把活体无线调试算进去", body.contains("pair && wirelessOn"))
   }
 
   @Test
-  fun probeTtlStaysStrictlyBelowTheThreeSecondPagePoll() {
+  fun producerIntervalIsBoundedAndProbeUsesTheValidatedEndpoint() {
     val code = codeOnly(source("AdbState.kt"))
     val m = Regex("WIRELESS_PROBE_TTL_MS = ([0-9_]+)").find(code)
-      ?: throw AssertionError("找不到 WIRELESS_PROBE_TTL_MS 常量")
+      ?: throw AssertionError("找不到后台观测间隔")
     val ttl = m.groupValues[1].replace("_", "").toLong()
-    assertTrue("TTL 必须为正", ttl > 0)
-    assertTrue("TTL(" + ttl + "ms) 必须 < 判据阈值 3000ms（关掉无线调试后 ≤3s 降级）", ttl < 3_000L)
-    assertTrue("探测必须真连 TCP", code.contains("tcpProbe(\"127.0.0.1\", port, WIRELESS_PROBE_TIMEOUT_MS)"))
+    assertTrue("后台间隔必须为正且小于页面轮询", ttl in 1 until 3_000L)
+    assertTrue("系统开关独立读取", code.contains("Settings.Global.getInt(context.contentResolver, \"adb_wifi_enabled\")"))
+    assertTrue("探测已验证的本机端点，不硬编码 adbd 地址", code.contains("tcpProbe(it.host, it.port, WIRELESS_PROBE_TIMEOUT_MS)"))
+    assertTrue("进程内有定期生产者", code.contains("scheduleWithFixedDelay"))
+    assertTrue("Activity 回前台启动生产者", codeOnly(source("MainActivity.kt")).contains("AdbState.startStatusMonitor("))
   }
 
   // ── ST-13：握手非 101 → 按状态码走鉴权刷新；refresh 不得缓存短路 ─────────────

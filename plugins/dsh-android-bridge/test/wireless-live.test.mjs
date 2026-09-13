@@ -1,74 +1,94 @@
-// ST-12（引擎半边）：无线调试「活体键」wirelessOn。
-// 壳侧 AdbState.syncWirelessLive() 写 <boolean name="wirelessOn">（TTL 2s < 页面轮询 3s）；
-// 引擎侧必须：wirelessOn 在场即用它，哪怕它是 false（配对后关掉无线调试的实时事实）；
-// 旧壳无该键 → 回落 paired（旧的间接证明语义）。
+// Wireless observations are independent of pairing; unknown/legacy/stale must fail closed.
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { AndroidPrivilegeService, parseAdbPrefsXml } from '../lib/index.js'
+import { AndroidPrivilegeService, parseAdbPrefsXml, wirelessState, WIRELESS_FRESH_MS } from '../lib/index.js'
 
-const saved = process.env.DSH_ADB_PREFS_PATH
-const savedFull = process.env.DSH_ADB_FULLACCESS
-
+const keys = ['DSH_ADB_PREFS_PATH', 'DSH_ADB_FULLACCESS', 'DSH_ADB_WIRELESS', 'DSH_ADB_PAIRED']
+const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+const dir = mkdtempSync(join(tmpdir(), 'dsh-wireless-test-'))
+const file = join(dir, 'prefs.xml')
 after(() => {
-  if (saved === undefined) delete process.env.DSH_ADB_PREFS_PATH
-  else process.env.DSH_ADB_PREFS_PATH = saved
-  if (savedFull === undefined) delete process.env.DSH_ADB_FULLACCESS
-  else process.env.DSH_ADB_FULLACCESS = savedFull
+  rmSync(dir, { recursive: true, force: true })
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
 })
-
-function prefsFile(inner) {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-st12-'))
-  const file = join(dir, 'dsh-adb.xml')
-  writeFileSync(file, '<map>\n  <boolean name="allowSwitch" value="true" />\n  <boolean name="paired" value="true" />\n  <boolean name="connected" value="true" />\n  <boolean name="fullAccess" value="true" />\n' + inner + '</map>\n')
-  return file
+function service(paired, wireless, extra = '', defaultMode = 'danger-full-access', sessionMode = 'danger-full-access') {
+  writeFileSync(file, `<map>
+    <boolean name="allowSwitch" value="true"/><boolean name="fullAccess" value="true"/>
+    <boolean name="paired" value="${paired}"/><boolean name="connected" value="true"/>
+    ${wireless === undefined ? '' : `<boolean name="wirelessOn" value="${wireless}"/>`}
+    ${extra}</map>`)
+  process.env.DSH_ADB_PREFS_PATH = file
+  return new AndroidPrivilegeService({}, () => defaultMode, { resolve: () => ({ mode: sessionMode }) })
 }
+const observation = () => `<boolean name="wirelessKnown" value="true"/><long name="wirelessObservedAt" value="${Date.now()}"/>`
 
-function statusWith(inner) {
-  process.env.DSH_ADB_PREFS_PATH = prefsFile(inner)
-  delete process.env.DSH_ADB_FULLACCESS
-  return new AndroidPrivilegeService({}, () => 'danger-full-access').status()
+for (const paired of [false, true]) for (const on of [false, true]) {
+  test(`status/real gate matrix paired=${paired}, wireless=${on}`, () => {
+    const svc = service(paired, on, observation())
+    const st = svc.status()
+    assert.equal(st.paired, paired)
+    assert.equal(st.wirelessDebugOn, on)
+    assert.equal(st.wirelessDebugState, on ? 'on' : 'off')
+    assert.equal(st.wirelessKnown, true)
+    assert.equal(svc.gateFacts().adbReady, paired && on)
+    assert.equal(svc.gateFor({}).ok, paired && on)
+    assert.equal(st.tier, paired && on ? 'T1' : 'T0')
+  })
 }
-
-test('ST-12 解析：wirelessOn 在场即回填（与 paired 分叉）', () => {
-  const on = parseAdbPrefsXml('<map><boolean name="allowSwitch" value="true" /><boolean name="paired" value="false" /><boolean name="wirelessOn" value="true" /></map>')
-  assert.equal(on.wirelessOn, true)
-  assert.equal(on.paired, false)
-  const off = parseAdbPrefsXml('<map><boolean name="allowSwitch" value="true" /><boolean name="paired" value="true" /><boolean name="wirelessOn" value="false" /></map>')
-  assert.equal(off.wirelessOn, false)
-  assert.equal(off.paired, true)
+test('independent wireless-only keys are admitted by parser', () => {
+  const p = parseAdbPrefsXml(`<map><boolean name="wirelessOn" value="true"/>${observation()}</map>`)
+  assert.equal(p.wirelessOn, true)
+  assert.equal(p.wirelessKnown, true)
+  assert.equal(p.paired, false)
+  assert.equal(wirelessState(p), 'on')
+  assert.ok(parseAdbPrefsXml('<map><boolean name="wirelessOn" value="false"/></map>'))
+  assert.ok(parseAdbPrefsXml('<map><boolean name="wirelessKnown" value="false"/></map>'))
 })
-
-test('ST-12 解析：旧壳无 wirelessOn 键 → undefined（不假装知道实时值）', () => {
-  const legacy = parseAdbPrefsXml('<map><boolean name="allowSwitch" value="true" /><boolean name="paired" value="true" /></map>')
-  assert.equal(legacy.wirelessOn, undefined)
+test('connected requires fresh wireless observation AND current endpoint reachability', () => {
+  assert.equal(service(true, true, observation() + '<boolean name="endpointReachable" value="true"/>').status().connected, true)
+  assert.equal(service(true, true, observation() + '<boolean name="endpointReachable" value="false"/>').status().connected, false)
+  assert.equal(service(true, true, observation()).status().connected, false)
+  assert.equal(service(true, true, '<boolean name="endpointReachable" value="true"/>').status().connected, false)
 })
-
-test('ST-12 状态：wirelessOn=true 时无线调试门成立（paired=false 也不影响）', () => {
-  const st = statusWith('  <boolean name="wirelessOn" value="true" />\n')
-  assert.equal(st.wirelessDebugOn, true)
-  assert.equal(st.authorized === undefined || st.authorized === null, true)
-  assert.equal(st.fullAccess, true)
+test('missing/legacy keys do not make historical pairing into live state', () => {
+  for (const on of [undefined, true, false]) {
+    const svc = service(true, on)
+    assert.equal(svc.status().wirelessDebugState, 'unknown')
+    assert.equal(svc.status().wirelessDebugOn, false)
+    assert.equal(svc.gateFor({}).ok, false)
+  }
 })
-
-test('ST-12 状态：wirelessOn=false 时以活体值为准（配对过但无线调试已关 = 门不成立）', () => {
-  const st = statusWith('  <boolean name="wirelessOn" value="false" />\n')
-  assert.equal(st.wirelessDebugOn, false)
-  // 反向自证口径：旧实现读 live.paired（此处 true）会把它判成成立——正是 ST-12 要修的缺陷形态
-  assert.equal(st.fullAccess, true, '其它门仍成立，只有无线调试门被活体键关掉')
+test('freshness boundaries, future stamps, failed observations are unknown', () => {
+  const now = 100_000
+  const base = { wirelessKnown: true, wirelessOn: true, wirelessObservedAt: now }
+  assert.equal(wirelessState(base, now), 'on')
+  for (const p of [
+    { ...base, wirelessKnown: false }, { ...base, wirelessObservedAt: undefined },
+    { ...base, wirelessOn: undefined }, { ...base, wirelessObservedAt: now + 1 },
+    { ...base, wirelessObservedAt: now - WIRELESS_FRESH_MS },
+    { ...base, wirelessObservedAt: NaN }, { ...base, wirelessObservedAt: 0 },
+  ]) assert.equal(wirelessState(p, now), 'unknown')
 })
-
-test('ST-12 状态：无 wirelessOn 键 → 回落 paired（旧语义不回归）', () => {
-  const st = statusWith('')
-  assert.equal(st.wirelessDebugOn, true)
-})
-
-test('ST-12 状态：无 prefs 文件 → 回落 env（桌面/测试宿主路径不变）', () => {
-  process.env.DSH_ADB_PREFS_PATH = join(tmpdir(), 'definitely-missing-dsh-adb.xml')
+test('legacy env wireless derived from pairing cannot open the gate without observations', () => {
+  process.env.DSH_ADB_PREFS_PATH = join(dir, 'missing.xml')
   process.env.DSH_ADB_WIRELESS = '1'
-  const st = new AndroidPrivilegeService({}, () => 'danger-full-access').status()
-  assert.equal(st.wirelessDebugOn, true)
-  delete process.env.DSH_ADB_WIRELESS
+  process.env.DSH_ADB_PAIRED = '1'
+  const svc = new AndroidPrivilegeService({}, () => 'danger-full-access')
+  assert.equal(svc.status().wirelessDebugState, 'unknown')
+  assert.equal(svc.gateFacts().adbReady, false)
+})
+for (const [defaultMode, sessionMode, allowed] of [
+  ['workspace-write', 'danger-full-access', true],
+  ['danger-full-access', 'read-only', false],
+]) test(`deployment ${defaultMode} is NOT session ${sessionMode}`, () => {
+  const svc = service(true, true, observation(), defaultMode, sessionMode)
+  assert.equal(svc.status().writeMode, defaultMode)
+  assert.equal(svc.gateFacts().adbReady, true)
+  assert.equal(svc.gateFor({}).ok, allowed)
 })
