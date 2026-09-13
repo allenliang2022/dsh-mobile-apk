@@ -109,6 +109,23 @@ must be rerun. The coordinated-root sync allowlist and synthetic layout regressi
 are in scripts/native-proot-mirror-files.json and native-proot-mirror.test.mjs.
 They are not a receipt of a synchronized real coordinator checkout.
 
+Source revision 5187ba6 additionally passed API26 and API28 helper instrumentation
+(7 tests on each emulator) and repeated API35 host/upgrade acceptance (8 tests).
+Both Gradle builds reported 267 JVM tests with no errors/failures/skips. The
+reported upgrade fingerprints changed from the baseline to the pinned source
+snapshot while the synthetic workspace bytes and symlink survived. Neither the
+API-boundary report nor the upgrade report claims ARM64 native guest acceptance.
+
+## Independent source rebuild
+
+The native-source-rebuild CI job uses NDK r29 and the bundled offline rebuild
+inputs in a fresh output directory. It never replaces the pinned APK payload.
+`vendor/native-proot/verify-rebuild.mjs` checks output ELF class/machine, native
+interpreter and PT_LOAD alignment, records SHA-256, and reports whether bytes match
+the pinned artifacts. Structural checks alone do not establish compilation: the
+preceding successful rebuild step is required. Native execution remains explicitly
+unverified by this job. No compiled replacement binary is published by this step.
+
 ## Tests and release boundary
 
 ```sh
