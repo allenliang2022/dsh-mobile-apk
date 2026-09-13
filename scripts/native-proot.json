@@ -13,7 +13,7 @@
         "libproot-loader.so": "b5b856b8b0d00d881d44d9fabfd6386499a607ceb9e8a5b95df94a3a2b7b451e",
         "libproot-loader32.so": "25f6bd90bc5a3d3088026289a0d3eaf3e502bd2b00e5cb74fadd9791132efa34"
       },
-      "sourceArchive": "vendor/native-proot/assets/native-proot-source/droidrunner-v1.0.0-source.tar.gz",
+      "sourceArchive": "vendor/native-proot/assets/native-proot-source/droidrunner-v1.0.0-source.tgz",
       "sourceArchiveSha256": "35113c4e20d4e00a433d99cbc99de0ce47a16234674592f356d2a64e105f43a6",
       "distributionUrl": "https://github.com/m96-chan/DroidRunner/releases/download/v1.0.0/droidrunner-v1.0.0.apk",
       "distributionSha256": "76417607c264e33d92a49adf1cf48569a3973d09dd016756d51a4b44eaa67592",

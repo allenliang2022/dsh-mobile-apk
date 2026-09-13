@@ -61,7 +61,7 @@ try {
         if (hash.digest('hex') !== digest) throw new Error('SHA-256 mismatch: ' + name)
         console.log(`PASS  ${selected}/${name}: ELF and pinned SHA-256`)
       }
-      if (!/^vendor\/native-proot\/assets\/native-proot-source\/[\w.-]+\.tar\.gz$/.test(record.sourceArchive || '') || !/^[a-f0-9]{64}$/.test(record.sourceArchiveSha256 || '')) throw new Error('metadata needs sourceArchive and pinned sourceArchiveSha256')
+      if (!/^vendor\/native-proot\/assets\/native-proot-source\/[\w.-]+\.(?:tar\.gz|tgz)$/.test(record.sourceArchive || '') || !/^[a-f0-9]{64}$/.test(record.sourceArchiveSha256 || '')) throw new Error('metadata needs sourceArchive and pinned sourceArchiveSha256')
       const archive = join(root, record.sourceArchive)
       if (!lstatSync(archive).isFile()) throw new Error('source archive must be a regular file')
       const archiveHash = createHash('sha256')

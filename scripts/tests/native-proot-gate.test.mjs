@@ -38,11 +38,12 @@ for abi in ['arm64-v8a','x86_64']:
     metadata['artifacts'][abi] = record
 sources = root/'vendor/native-proot/assets/native-proot-source'; sources.mkdir(parents=True)
 source_data = gzip.compress(b'synthetic corresponding source archive',mtime=0)
-(sources/'fixture-source.tar.gz').write_bytes(source_data)
+archive_name = spec.get('archiveName','fixture-source.tar.gz')
+(sources/archive_name).write_bytes(source_data)
 for name in ['COPYING.proot','GPL-3.0.txt','LGPL-3.0.txt','rebuild-arm64.sh','string-header.patch','talloc-answers.txt']:
     (sources/name).write_text('synthetic fixture '+name)
 for record in metadata['artifacts'].values():
-    record['sourceArchive'] = 'vendor/native-proot/assets/native-proot-source/fixture-source.tar.gz'
+    record['sourceArchive'] = 'vendor/native-proot/assets/native-proot-source/'+archive_name
     record['sourceArchiveSha256'] = hashlib.sha256(source_data).hexdigest()
 (root/'scripts').mkdir()
 (root/'scripts/native-proot.json').write_text(json.dumps(metadata))
@@ -105,7 +106,9 @@ if spec.get('truncatedSnapshot'): snapshot = snapshot[:-16]
 entries = {'AndroidManifest.xml':manifest,'assets/snapshot.tar.xz':snapshot,'assets/snapshot.sha256':hashlib.sha256(snapshot).hexdigest().encode(),'assets/unrelated.bin':b'CRC negative control'}
 entries.update({name:data for name,data in payloads.items() if name.startswith('lib/'+abi+'/')})
 entries.update({'assets/native-proot-source/'+p.name:p.read_bytes() for p in sources.iterdir()})
-if spec.get('changedSourceAsset'): entries['assets/native-proot-source/fixture-source.tar.gz'] += b'x'
+if spec.get('changedSourceAsset'): entries['assets/native-proot-source/'+archive_name] += b'x'
+if spec.get('renamedSourceAsset'):
+    entries['assets/native-proot-source/fixture-source.tar'] = entries.pop('assets/native-proot-source/'+archive_name)
 if spec.get('fingerprintMismatch'): entries['assets/snapshot.sha256'] = b'0'*64
 if spec.get('wrongLibraryAbi'):
     entries['lib/'+abi+'/libproot.so'] = elf('x86_64' if abi == 'arm64-v8a' else 'arm64-v8a')
@@ -263,4 +266,24 @@ test('null supported metadata cannot masquerade as explicitly unsupported', t =>
   changeMetadata(root, m => { m.artifacts['arm64-v8a'] = null })
   rmSync(join(root, 'app/src/main/jniLibs/arm64-v8a'), { recursive: true })
   expect(run(root), 1, /invalid supported artifact record/)
+})
+
+
+test('tgz corresponding source is accepted by source and APK gates', t => {
+  const root = fixture(t, { archiveName: 'fixture-source.tgz' })
+  expect(run(root), 0, /pinned corresponding source archive/)
+  expect(run(root, 'arm64', true), 0, /all ZIP CRCs/)
+})
+test('tgz archive still requires byte-for-byte APK hash equality', t => {
+  const root = fixture(t, { archiveName: 'fixture-source.tgz', changedSourceAsset: true })
+  expect(run(root, 'arm64', true), 1, /APK source\/license\/rebuild asset SHA-256 mismatch/)
+})
+test('missing source diagnostic reports only actual source-asset member names', t => {
+  const root = fixture(t, { renamedSourceAsset: true })
+  const result = run(root, 'arm64', true)
+  expect(result, 1, /assets missing/)
+  const diagnostic = result.output.split('actual assets/native-proot-source members: ')[1]?.split('\n')[0]
+  assert.ok(diagnostic, result.output)
+  assert.match(diagnostic, /assets\/native-proot-source\/fixture-source\.tar'/)
+  assert.doesNotMatch(diagnostic, /fixture-source\.tar\.gz|AndroidManifest|assets\/snapshot|unrelated\.bin|lib\/arm64/)
 })

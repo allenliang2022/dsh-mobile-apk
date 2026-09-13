@@ -68,6 +68,8 @@ android {
   androidResources {
     // snapshot.tar.xz is already xz-compressed; double-compressing it breaks openFd.
     noCompress += "xz"
+    // Keep the already compressed corresponding-source archive byte-for-byte.
+    noCompress += "tgz"
   }
 
   signingConfigs {

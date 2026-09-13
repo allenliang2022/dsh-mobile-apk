@@ -5,7 +5,7 @@ The ARM64 executable/loader bytes are copied without modification from
 commit `28bec00176724fd132f21bf0f21cd708d4811c57`. Artifact SHA-256 values,
 archive hashes, Android API and the scope of testing are in `scripts/native-proot.json`.
 
-The accompanying `droidrunner-v1.0.0-source.tar.gz` contains Termux PRoot at
+The accompanying `droidrunner-v1.0.0-source.tgz` contains Termux PRoot at
 `7266fb3e8516535682f5a9c8f3a7e70f6506eddb`, talloc 2.4.3 source, the original build
 script and `string-header.patch`. We additionally supply `talloc-answers.txt`
 from that exact DroidRunner commit: the original source archive omitted it although

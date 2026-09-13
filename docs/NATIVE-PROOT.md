@@ -106,8 +106,16 @@ maintainer change. No CI/mirror gate is disabled to make this draft appear green
 ### Local verification receipt (before initial review commit)
 
 - Launcher behaviour: 21 passed, 0 failed, 0 skipped.
-- Gate/negative fixtures: 62 passed, 0 failed, 0 skipped; includes corrupt/missing/duplicate ZIP and AXML cases plus streaming large members.
+- Gate/negative fixtures: 65 passed, 0 failed, 0 skipped; includes corrupt/missing/duplicate ZIP and AXML cases plus streaming large members.
 - Kotlin runtime helper: 21 JUnit tests passed on JDK21 with Kotlin2.0.21 and JVM target17. Only Android linking APIs were stubbed; this is not Gradle/device verification.
 - Source payload/provenance gate, static build-gate wiring, state registry, manifest hardening, bounded IO, Kotlin comment checks, shell syntax and git whitespace check passed.
 - A dedicated native-proot-validation workflow will test both host APK ABIs with a SHA-256-pinned public v0.14.0-preview factory snapshot. It is a development integration check, not a replacement for the private coordination mirror or full release pipeline.
 - No user token/configuration/rootfs or diagnostic transcript is included in the Git changes.
+
+### First cloud attempt
+
+Run 34735460798 built the ARM64 source APK and ran Gradle JVM tests successfully,
+but final verification rejected a missing .tar.gz corresponding-source asset. The
+archive is now packaged as .tgz (same gzip bytes and SHA256, noCompress=tgz) to avoid
+.gz asset handling. This failed APK was not delivered. Subsequent validation must
+verify the actual asset names and bytes, not merely successful compilation.

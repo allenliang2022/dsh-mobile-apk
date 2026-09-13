@@ -68,7 +68,23 @@ jobs:
             -PtargetAbi="${{ matrix.targetAbi }}" -PversionNameSuffix=-native-proot-review
 
       - name: Verify actual APK before making a dev artifact
+        id: verify_apk
         run: node scripts/check-native-proot.mjs --abi "${{ matrix.targetAbi }}" --apk app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Diagnose source-asset member names after APK gate failure
+        if: failure() && steps.verify_apk.outcome == 'failure'
+        run: |
+          python - <<'PY'
+          import pathlib, zipfile
+          apk = pathlib.Path("app/build/outputs/apk/debug/app-debug.apk")
+          if apk.is_file():
+              with zipfile.ZipFile(apk) as archive:
+                  for name in sorted(archive.namelist()):
+                      if name.startswith("assets/native-proot-source/"):
+                          print(name)
+          else:
+              print("APK unavailable; no native-proot-source members to inspect")
+          PY
 
       - name: Upload JVM test reports even when validation fails
         if: always()

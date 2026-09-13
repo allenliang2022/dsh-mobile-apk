@@ -237,7 +237,7 @@ def verify(root, apk, abi):
         require(f"lib/{abi}/libproot.so" in expected and f"lib/{abi}/libproot-loader.so" in expected, "metadata missing required native files")
     source_assets = {}
     if record is not None:
-        require(re.fullmatch(r"vendor/native-proot/assets/native-proot-source/[\w.-]+\.tar\.gz", record.get("sourceArchive", "")), "invalid sourceArchive path")
+        require(re.fullmatch(r"vendor/native-proot/assets/native-proot-source/[\w.-]+\.(?:tar\.gz|tgz)", record.get("sourceArchive", "")), "invalid sourceArchive path")
         source_archive = root / record["sourceArchive"]
         with source_archive.open("rb") as file:
             archive_hash, _, _, _ = scan(file)
@@ -254,7 +254,11 @@ def verify(root, apk, abi):
         entries = archive.infolist()
         counts = collections.Counter(entry.filename for entry in entries)
         require(all(count == 1 for count in counts.values()), "duplicate ZIP entries: " + ", ".join(name for name, count in counts.items() if count != 1))
-        require(source_assets.keys() <= counts.keys(), "APK corresponding source/license/rebuild assets missing: " + str(sorted(source_assets.keys() - counts.keys())))
+        missing_source_assets = sorted(source_assets.keys() - counts.keys())
+        if missing_source_assets:
+            actual_source_members = sorted(name for name in counts if name.startswith("assets/native-proot-source/"))
+            raise ValueError("APK corresponding source/license/rebuild assets missing: " + str(missing_source_assets)
+                             + "; actual assets/native-proot-source members: " + str(actual_source_members))
         native = {name for name in counts if name.startswith("lib/") and not name.endswith("/")}
         require(native == set(expected), "APK native entry set mismatch (missing/unpinned/wrong ABI): " + str(sorted(native ^ set(expected))))
         for entry in entries:

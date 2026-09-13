@@ -14,7 +14,7 @@ AR="$TOOLS/llvm-ar"
 [ "$#" -eq 1 ] || { echo "Usage: ANDROID_NDK_ROOT=... bash rebuild-arm64.sh NEW_OUTPUT_DIR" >&2; exit 2; }
 OUT="$1"
 [ ! -e "$OUT" ] || { echo "Output must not exist; refusing to replace it" >&2; exit 2; }
-SOURCE="$HERE/droidrunner-v1.0.0-source.tar.gz"
+SOURCE="$HERE/droidrunner-v1.0.0-source.tgz"
 echo "35113c4e20d4e00a433d99cbc99de0ce47a16234674592f356d2a64e105f43a6  $SOURCE" | sha256sum -c -
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
