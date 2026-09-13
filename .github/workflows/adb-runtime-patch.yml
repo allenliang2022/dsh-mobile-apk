@@ -1,0 +1,97 @@
+# Builds only a small runtime patch. The APK below is an isolated CI test carrier,
+# not a DSH upgrade and never delivered/installed on a physical device.
+name: ADB runtime patch
+on:
+  push:
+    branches: [fix/adb-runtime-patch]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install pinned native compiler and test platform
+        run: sdkmanager "ndk;27.2.12479018" "platforms;android-36" "build-tools;36.0.0"
+      - name: Host native logic, execution and selective installer regressions
+        run: |
+          set -euo pipefail
+          sh runtime-patches/adb-local-listener/native/tests/run-host-tests.sh
+          python -B -m unittest discover -s runtime-patches/adb-local-listener -p 'test_apply_patch.py' -v
+      - name: Build both Android PIE shims and isolated fake payload
+        run: |
+          set -euo pipefail
+          TOOLCHAIN="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NATIVE=runtime-patches/adb-local-listener/native
+          mkdir -p build/runtime-patch/native
+          for tuple in 'arm64-v8a aarch64-linux-android26-clang' 'x86_64 x86_64-linux-android26-clang'; do
+            read -r ABI COMPILER <<< "$tuple"
+            "$TOOLCHAIN/$COMPILER" -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie \
+              -Wl,-z,relro,-z,now,-z,max-page-size=16384 -I"$NATIVE" "$NATIVE/adb_shim.c" "$NATIVE/shim_logic.c" \
+              -ldl -o "build/runtime-patch/native/adb-shim-$ABI"
+            "$TOOLCHAIN/$COMPILER" -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie \
+              -Wl,-z,max-page-size=16384 "$NATIVE/tests/fake_original.c" -o "build/runtime-patch/native/fake-original-$ABI"
+          done
+          python runtime-patches/adb-local-listener/build_package.py \
+            --native-dir build/runtime-patch/native --output build/runtime-patch/package
+      - name: Prepare only the isolated test carrier runtime
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --max-time 600 \
+            https://github.com/kelai141/dsh-mobile-apk/releases/download/v0.14.0-preview/snapshot-x86_64.tar.xz \
+            --output build/runtime-patch/snapshot-x86_64.tar.xz
+          python runtime-patches/adb-local-listener/tests/prepare_fixture.py \
+            --snapshot build/runtime-patch/snapshot-x86_64.tar.xz \
+            --snapshot-sha256 8409612269a56e7529da6527e153744c161a235be6679b2d3d5219d17f63be79 \
+            --abi x86_64 --package build/runtime-patch/package \
+            --fake-original build/runtime-patch/native/fake-original-x86_64 \
+            --output runtime-patches/adb-local-listener/tests/android/app/src/main/assets/fixture.zip
+          chmod +x gradlew
+          ./gradlew -p runtime-patches/adb-local-listener/tests/android \
+            :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
+      - name: Enable disposable emulator KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Verify explicit linker loading, real server, argv and failure boundaries
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            mkdir -p build/runtime-patch/reports
+            adb -s emulator-5554 install -t runtime-patches/adb-local-listener/tests/android/app/build/outputs/apk/debug/app-debug.apk
+            adb -s emulator-5554 install -t runtime-patches/adb-local-listener/tests/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            adb -s emulator-5554 shell am instrument -w -r -e class com.dsharnessmobile.adbpatchtest.ShimIntegrationTest com.dsharnessmobile.adbpatchtest.test/androidx.test.runner.AndroidJUnitRunner > build/runtime-patch/reports/instrumentation.txt
+            python -c "from pathlib import Path; s=Path('build/runtime-patch/reports/instrumentation.txt').read_text(); print(s); assert 'OK (3 tests)' in s and 'FAILURES!!!' not in s and 'INSTRUMENTATION_FAILED' not in s"
+      - name: Upload bounded test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adb-runtime-patch-tests
+          path: build/runtime-patch/reports/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload only the validated runtime patch, never the test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: adb-local-listener-patch
+          path: build/runtime-patch/package/
+          if-no-files-found: error
+          retention-days: 14
