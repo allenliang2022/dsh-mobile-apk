@@ -353,7 +353,9 @@ object AdbState {
       environment().remove("ANDROID_ADB_SERVER_ADDRESS")
       environment().remove("ANDROID_ADB_SERVER_PORT")
       environment().remove("ADB_TRACE")
-      environment()["ADB_SERVER_SOCKET"] = "tcp:127.0.0.1:5037"
+      // The Android adb daemon rejects numeric listen hostnames (even 127.0.0.1).
+      // Hostless tcp:5037 is loopback-only without -a and also works for local clients.
+      environment()["ADB_SERVER_SOCKET"] = adbLocalServerSocket()
       redirectErrorStream(true)
       if (out != null) redirectOutput(out)
     }

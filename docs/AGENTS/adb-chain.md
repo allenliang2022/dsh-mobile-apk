@@ -38,7 +38,7 @@
 
 `AdbServerLifecycle` 用一把锁管理所有权、就绪验证、命令和恢复。每次操作验证本地服务器，而不是永久相信 `serverReady`。
 
-- 本地 ADB **服务器**固定在 `127.0.0.1:5037`，它与目标 adbd 的 host/port 是不同层。
+- 本地 ADB **服务器**通过 `127.0.0.1:5037` 探活，但共享启动参数必须用 `adbLocalServerSocket()` 返回的 **`tcp:5037`**，它与目标 adbd 的 host/port 是不同层。Android adb 的监听器不支持数字 hostname：`tcp:127.0.0.1:5037` 会直接报 `listening on specified hostname currently unsupported` 并退出。没有 `-a` 的 hostless 写法仍仅监听回环；不能为了兼容而开放所有接口。
 - 仅可重启自身持有的进程；等待退出与 socket 释放，有界失败返回恢复状态。不终止无法确认所有权的共享监听器，不使用全局 `kill-server`。
 - `devices` 往返仅证明服务器响应，不证明配对服务或连接设备健康。配对/连接分别需要正常退出、无超时和对应正向协议应答。
 - 协议故障不自动等同于本地竞态；连接拒绝不证明配对窗口关闭；超时、认证失败、服务器未就绪分别报告。
@@ -51,6 +51,7 @@
 - 插件：在 `plugins/dsh-android-bridge` 执行 `npm ci --include=dev`、`npm run typecheck`、`npm test`。Android 宿主的 node-worker/exec shim 若阻断默认 runner，可用 `node --test --test-isolation=none test/*.test.mjs` 单独验证断言，并如实记录与标准命令的区别。
 - 原生：`./gradlew :app:testDebugUnitTest`；新增 endpoint/discovery/process/operation-registry 测试，更新调用点契约。纯 Kotlin/JVM 通过不等于 Android adapter 已验证。
 - `AdbBridgeInstrumentedTest` 仅在一次性 ranchu/goldfish 模拟器运行，验证真实 WebView-Java 异步票据与 NSD 监听器契约；不执行生产 ADB 命令，不创建配对授权，也不声称真实手机配对通过。
+- `AdbServerStartupInstrumentedTest` 从随包快照提取最小客户端/库到私有夹具，使用生产 `adbLocalServerSocket` 启动独立端口的真实 adb 服务器，并验证 `host:devices` 本地 RPC 的空列表。临时 HOME、禁用 mDNS 自动连接、限制为不存在的 USB 设备；只终止自身 Process、无 `pair`/`connect`/设备 shell、无现有密钥访问。它补足“策略测试/NSD 通过，但随包 ADB 参数不兼容”的覆盖缺口，仍不代替真实手机配对验收。
 - `.github/workflows/adb-wireless-validation.yml` 构建双 ABI 开发 APK、运行测试和隔离 Android 35 仪器检查，不发布 Release。
 - `scripts/adb-bridge-snapshot.py` 只把本次测试后的 bridge 包注入 SHA-256 固定的公开工厂快照，双 profile 逐字节校验包成员，保留其他配置/插件/符号链接。`scripts/tests/adb-bridge-snapshot.test.py` 包含错误输入、缺 profile、旧模块修剪和非目标不变性负控。
 - 真实设备验收仍需：版本/包内容核对 → 开关状态变化 → 仅连接端口/打开配对窗口后的发现 → 真配对与指定端点连接 → 重启/切网/撤销后的收敛。每项要有独立结果，不能用另一层的成功替代。

@@ -3,7 +3,7 @@ name: ADB wireless validation
 
 on:
   push:
-    branches: [fix/wireless-debug-discovery]
+    branches: [fix/wireless-debug-discovery, fix/adb-local-server-listener]
   workflow_dispatch:
 
 permissions:
@@ -70,7 +70,7 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest \
             --no-daemon --stacktrace -PtargetAbi="${{ matrix.abi }}" \
-            -PversionNameSuffix=-adb-wireless-review
+            -PversionNameSuffix=-adb-wireless-review2
       - name: Verify packaged snapshot, ABI and native provenance
         run: |
           set -euo pipefail
@@ -147,8 +147,8 @@ jobs:
             mkdir -p reports
             adb -s emulator-5554 install -t input/app/app-debug.apk
             adb -s emulator-5554 install -t input/test/app-debug-androidTest.apk
-            adb -s emulator-5554 shell am instrument -w -r -e class com.dsharnessmobile.shell.AdbBridgeInstrumentedTest com.dsharnessmobile.shell.test/androidx.test.runner.AndroidJUnitRunner > reports/instrumentation.txt
-            python -c "from pathlib import Path; s=Path('reports/instrumentation.txt').read_text(); print(s); assert 'OK (2 tests)' in s and 'FAILURES!!!' not in s and 'INSTRUMENTATION_FAILED' not in s"
+            adb -s emulator-5554 shell am instrument -w -r -e class com.dsharnessmobile.shell.AdbBridgeInstrumentedTest,com.dsharnessmobile.shell.AdbServerStartupInstrumentedTest com.dsharnessmobile.shell.test/androidx.test.runner.AndroidJUnitRunner > reports/instrumentation.txt
+            python -c "from pathlib import Path; s=Path('reports/instrumentation.txt').read_text(); print(s); assert 'OK (3 tests)' in s and 'FAILURES!!!' not in s and 'INSTRUMENTATION_FAILED' not in s"
       - name: Upload bounded instrumentation output
         if: always()
         uses: actions/upload-artifact@v4

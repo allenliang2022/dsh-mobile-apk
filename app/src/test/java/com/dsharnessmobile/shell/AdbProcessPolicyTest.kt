@@ -7,6 +7,22 @@ class AdbProcessPolicyTest {
   private fun success(phase: String = "pair") = AdbCommandResult("Successfully paired to local", 0, phase)
   private fun fault() = AdbCommandResult("error: protocol fault (couldn't read status message): Success", 1, "pair")
 
+  @Test fun localServerSocketUsesAndroidCompatibleHostlessListenSyntax() {
+    assertEquals("tcp:5037", adbLocalServerSocket())
+    assertEquals("tcp:15037", adbLocalServerSocket(15037))
+    assertFalse(adbLocalServerSocket().contains("127.0.0.1"))
+    for (port in listOf(0, -1, 65536)) {
+      try { adbLocalServerSocket(port); fail("Invalid port accepted") }
+      catch (_: IllegalArgumentException) { }
+    }
+    val source = listOf(
+      java.io.File("src/main/java/com/dsharnessmobile/shell/AdbState.kt"),
+      java.io.File("app/src/main/java/com/dsharnessmobile/shell/AdbState.kt"),
+    ).first { it.isFile }.readText()
+    assertTrue(source.contains("environment()[\"ADB_SERVER_SOCKET\"] = adbLocalServerSocket()"))
+    assertFalse(source.contains("environment()[\"ADB_SERVER_SOCKET\"] = \"tcp:127.0.0.1:5037\""))
+  }
+
   @Test fun failuresAreNotFalselyBlamedOnPairingWindow() {
     assertEquals("handshake-timeout", classifyAdbFailure("failed to connect: timed out"))
     assertEquals("server-not-ready", classifyAdbFailure("cannot connect to daemon at tcp:5037"))

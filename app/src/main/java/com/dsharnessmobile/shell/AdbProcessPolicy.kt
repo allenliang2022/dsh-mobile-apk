@@ -1,5 +1,12 @@
 package com.dsharnessmobile.shell
 
+/** Android adb accepts hostless/localhost listener specs, not a numeric listen hostname.
+ * Without -a this form remains loopback-only; clients and the daemon share the same spec. */
+internal fun adbLocalServerSocket(port: Int = 5037): String {
+  require(port in 1..65535) { "Invalid local ADB server port" }
+  return "tcp:$port"
+}
+
 /** Values crossing into UI/audit must already be redacted; never include argv or a pairing code. */
 internal fun redactAdbText(text: String, secrets: List<String>): String =
   secrets.filter { it.isNotEmpty() }.fold(text) { value, secret -> value.replace(secret, "[REDACTED]") }
